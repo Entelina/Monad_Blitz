@@ -4,7 +4,7 @@ import "./globals.css";
 export const metadata: Metadata = {
   title: "TaskRail Stream | Machine-Executed Per-Test Verification & Micro-Escrow on Monad",
   description:
-    "Not manual approval, not LLM scoring. Live isolated sandbox runs 16 real tests per commit: each passing test streams micro-payout on Monad Testnet; any failure halts escrow instantly with 284ms refund.",
+    "A Monad Testnet prototype for per-check code verification and escrow: passing checks release payments, and failed checks stop subsequent payouts.",
 };
 
 export const viewport: Viewport = {

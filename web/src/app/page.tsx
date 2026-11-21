@@ -280,7 +280,8 @@ export default function HomePage() {
   }, []);
 
   useEffect(() => {
-    terminalEndRef.current?.scrollIntoView({ behavior: "smooth", block: "nearest" });
+    const terminal = terminalEndRef.current?.parentElement;
+    if (terminal) terminal.scrollTop = terminal.scrollHeight;
   }, [terminalLines]);
 
   const canonicalMutations = useMemo(
@@ -318,12 +319,6 @@ export default function HomePage() {
     return Math.round(sum / finalized.length);
   }, [streamItems]);
 
-  const avgProposedMs = useMemo(() => {
-    if (streamItems.length === 0) return null;
-    const sum = streamItems.reduce((a, b) => a + b.proposedLatencyMs, 0);
-    return Math.round(sum / streamItems.length);
-  }, [streamItems]);
-
   const copyText = (key: string, val: string) => {
     navigator.clipboard?.writeText(val);
     setCopiedKey(key);
@@ -345,6 +340,10 @@ export default function HomePage() {
 
   const toggleMutation = (id: BugMutationId) => {
     if (busyAction !== null) return;
+    if (activeTaskId && ["OPEN", "HALTED", "DISPUTED"].includes(taskStatus)) {
+      setErrorBanner("当前任务尚未结束。请先完成验证或退回剩余资金，再切换场景。");
+      return;
+    }
     resetRunState();
     setSelectedMutations((prev) =>
       prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]
@@ -353,6 +352,10 @@ export default function HomePage() {
 
   const applyPresetMutations = (next: BugMutationId[]) => {
     if (busyAction !== null) return;
+    if (activeTaskId && ["OPEN", "HALTED", "DISPUTED"].includes(taskStatus)) {
+      setErrorBanner("当前任务尚未结束。请先完成验证或退回剩余资金，再切换场景。");
+      return;
+    }
     resetRunState();
     setSelectedMutations(next);
     if (next.length === 0) setSimulateDishonest(false);
@@ -371,6 +374,10 @@ export default function HomePage() {
   };
 
   const handleLockEscrow = async (): Promise<`0x${string}` | null> => {
+    if (activeTaskId && ["OPEN", "HALTED", "DISPUTED"].includes(taskStatus)) {
+      setErrorBanner("当前任务尚未结束。请先完成验证或退回剩余资金，再创建新任务。");
+      return null;
+    }
     if (!status?.contractReady || !activePreset) {
       setErrorBanner("尚未部署或配置 NEXT_PUBLIC_CONTRACT_ADDRESS");
       return null;
@@ -514,8 +521,6 @@ export default function HomePage() {
 
         const existingState = trackerRef.current?.getBlockState(chain.blockNumber);
         const initialCommitState: MonadCommitState = existingState || "Proposed";
-        const isAlreadyFinal =
-          initialCommitState === "Finalized" || initialCommitState === "Verified";
 
         const item: StreamCheckItem = {
           checkIndex: i,
@@ -537,7 +542,7 @@ export default function HomePage() {
           verifierAddress: chain.verifierAddress,
           sentAtMs: chain.sentAtMs,
           proposedLatencyMs: chain.proposedLatencyMs,
-          finalizedLatencyMs: isAlreadyFinal ? chain.proposedLatencyMs : undefined,
+          finalizedLatencyMs: undefined,
           commitState: initialCommitState,
           blockNumber: chain.blockNumber,
           gasLimit: chain.gasLimit,
@@ -642,8 +647,6 @@ export default function HomePage() {
 
           const existingState = trackerRef.current?.getBlockState(chain.blockNumber);
           const initialCommitState: MonadCommitState = existingState || "Proposed";
-          const isAlreadyFinal =
-            initialCommitState === "Finalized" || initialCommitState === "Verified";
 
           return {
             checkIndex: exec.checkIndex,
@@ -665,7 +668,7 @@ export default function HomePage() {
             verifierAddress: chain.verifierAddress,
             sentAtMs: chain.sentAtMs,
             proposedLatencyMs: chain.proposedLatencyMs,
-            finalizedLatencyMs: isAlreadyFinal ? chain.proposedLatencyMs : undefined,
+            finalizedLatencyMs: undefined,
             commitState: initialCommitState,
             blockNumber: chain.blockNumber,
             gasLimit: chain.gasLimit,
@@ -840,7 +843,9 @@ export default function HomePage() {
           : null,
         verifiedAt: new Date().toLocaleTimeString(),
       });
-      setTaskStatus(TASK_STATUS_LABEL[Number(task.status)] || taskStatus);
+      if (activeTaskId?.toLowerCase() === targetId.toLowerCase()) {
+        setTaskStatus(TASK_STATUS_LABEL[Number(task.status)] || taskStatus);
+      }
     } catch (err) {
       setErrorBanner(`链上直读验证失败: ${err instanceof Error ? err.message : String(err)}`);
     } finally {
@@ -978,19 +983,19 @@ export default function HomePage() {
               <div className="flex flex-wrap items-center gap-2 font-mono-tabular text-[11px] uppercase tracking-widest">
                 <span className="inline-flex items-center gap-1.5 text-[#a3e635]">
                   <span className="h-1.5 w-1.5 rounded-full bg-[#a3e635]" aria-hidden="true" />
-                  NOT MANUAL CLICK · NOT LLM SCORING · NOT STATIC HASH
+                  AI 代码交付 · 按验收进度结算
                 </span>
               </div>
-              <h1 className="mt-1.5 text-xl font-bold tracking-tight sm:text-2xl">
-                <span className="text-white">沙盒真跑 16 条单测，过一条放一笔款。</span>{" "}
-                <span className="text-cyan-300">错一条当场熔断，284ms 退回剩余资金。</span>
+              <h1 className="mt-2 text-2xl font-bold leading-tight tracking-tight sm:text-3xl">
+                <span className="text-white">每通过一项验收，结算一笔。</span>{" "}
+                <span className="text-cyan-300">遇到漏洞，停止后续支付。</span>
               </h1>
-              <p className="mt-1.5 text-xs leading-relaxed text-[#8aa0b4]">
-                区别于往届“人工点确认 / LLM 打分 / 只存结果哈希”的托管合约：左侧隔离{" "}
-                <code className="text-cyan-200">node:vm</code> 真实执行代码并抛出{" "}
-                <code className="text-rose-300">AssertionError</code>，右侧 Monad 链上交易瀑布与资金流实时同步停止。支持{" "}
-                <strong className="text-slate-200">AI 代码交付按单测结算</strong> 与{" "}
-                <strong className="text-slate-200">AI 安全红队针对性攻击测试 PoC 按漏洞条数结算</strong>。
+              <p className="mt-2 max-w-3xl text-sm leading-relaxed text-slate-300">
+                为代码交付与安全审计提供逐项验收原型：雇主锁定赏金，验证器执行预设测试；
+                通过的部分立即结算，失败后雇主可取回未支付的余额。
+              </p>
+              <p className="mt-3 text-xs leading-relaxed text-amber-200">
+                原型信任边界：当前依赖单一验证器；争议不会自动裁决真伪，也不能追回已支付的款项。
               </p>
             </div>
 
@@ -998,14 +1003,14 @@ export default function HomePage() {
             <div className="grid grid-cols-3 gap-2 font-mono-tabular lg:col-span-4">
               <div className="border border-cyan-400/20 bg-[#070b16] p-2.5">
                 <div className="text-[10px] uppercase tracking-wider text-[#8aa0b4]">
-                  SYNC RPC RTT
+                  历史样例 · RPC
                 </div>
                 <div className="mt-0.5 text-lg font-bold text-cyan-300">156ms</div>
                 <div className="text-[10px] text-[#5a6d82]">eth_sendRawTxSync</div>
               </div>
               <div className="border border-cyan-400/20 bg-[#070b16] p-2.5">
                 <div className="text-[10px] uppercase tracking-wider text-[#8aa0b4]">
-                  LIVE FINALITY
+                  历史样例 · FINALITY
                 </div>
                 <div className="mt-0.5 text-lg font-bold text-[#a3e635]">965ms</div>
                 <div className="text-[10px] text-[#5a6d82]">monadNewHeads 实测</div>
@@ -1015,7 +1020,7 @@ export default function HomePage() {
                   BURST PACKING
                 </div>
                 <div className="mt-0.5 text-lg font-bold text-violet-300">16 TX/1 BLK</div>
-                <div className="text-[10px] text-[#5a6d82]">单 300ms 区块 #81491937</div>
+                <div className="text-[10px] text-[#8aa0b4]">历史区块 #81491937</div>
               </div>
             </div>
           </div>
@@ -1046,7 +1051,7 @@ export default function HomePage() {
             <div className="flex flex-wrap items-center gap-2">
               <Bug className="h-4 w-4 text-rose-400" aria-hidden="true" />
               <h2 className="font-mono-tabular text-xs font-bold uppercase tracking-widest text-white">
-                // LIVE BUG MUTATOR · 评委现场漏洞注入器（真改源码 + 真重算 runHash + 拒绝写死 Mock）
+              ① 选择演示场景 · 注入预设漏洞或选择全绿
               </h2>
             </div>
 
@@ -1082,7 +1087,9 @@ export default function HomePage() {
                     : "bg-rose-500/20 text-rose-300"
                 }`}
               >
-                {activePreset?.expectedFirstFailIndex === null
+                {!activePreset
+                  ? "正在加载演示配置…"
+                  : activePreset.expectedFirstFailIndex === null
                   ? "✓ PREDICTED: 16/16 ALL PASS"
                   : `✕ WILL HALT @ CHECK #${String(activePreset?.expectedFirstFailIndex).padStart(2, "0")}`}
               </span>
@@ -1128,6 +1135,12 @@ export default function HomePage() {
           </div>
 
           {/* Execution Options + Primary Action Buttons */}
+          <p className="mt-3 text-sm text-slate-300">
+            ② 运行逐项演示 · ③ 若触发熔断，点击退款。交易使用 Monad 测试网 MON。
+          </p>
+          <p className="mt-1 text-xs leading-relaxed text-[#a7b9cb]">
+            演示任务创建时预先绑定代码、测试编号与运行器标识；当前未完整绑定测试实现或运行环境。
+          </p>
           <div className="mt-3 flex flex-wrap items-center justify-between gap-3 border-t border-cyan-400/15 pt-3 text-xs">
             <div className="flex flex-wrap items-center gap-2.5">
               <button
@@ -1156,7 +1169,7 @@ export default function HomePage() {
                 <span>
                   {busyAction === "bursting"
                     ? "MONAD PIPELINE BURSTING..."
-                    : "⚡ 并发齐射模式（16 笔压入单 300ms 区块）"}
+                      : "⚡ 运行 16 项并发结算"}
                 </span>
               </button>
 
@@ -1218,7 +1231,7 @@ export default function HomePage() {
                 <select
                   id="reward-select"
                   value={rewardMon}
-                  disabled={busyAction !== null}
+                  disabled={busyAction !== null || Boolean(activeTaskId)}
                   onChange={(e) => setRewardMon(e.target.value)}
                   className="border border-cyan-400/25 bg-[#070b16] px-2 py-1 text-white"
                 >
@@ -1422,7 +1435,7 @@ export default function HomePage() {
                     ? "// REFUNDED"
                     : taskStatus === "HALTED" || taskStatus === "DISPUTED"
                       ? "// HALT PROTECTED"
-                      : "// ESCROW LOCKED"}
+                      : taskStatus === "IDLE" ? "// 待锁定金额" : "// ESCROW REMAINING"}
                 </div>
                 <div className="mt-1 font-mono-tabular text-xl font-bold text-white">
                   {remainingMon.toFixed(4)}{" "}
@@ -1435,29 +1448,25 @@ export default function HomePage() {
 
               <div className="hud-panel p-3.5">
                 <div className="font-mono-tabular text-[10px] uppercase tracking-wider text-[#8aa0b4]">
-                  // FINALITY (LIVE)
+                  // 客户端观察耗时
                 </div>
                 <div className="mt-1 font-mono-tabular text-xl font-bold text-cyan-300">
-                  {avgFinalityMs !== null
-                    ? `${avgFinalityMs}ms`
-                    : avgProposedMs !== null
-                      ? `${avgProposedMs}ms*`
-                      : "—"}
+                  {avgFinalityMs !== null ? `约 ${avgFinalityMs}ms` : "—"}
                 </div>
                 <div className="mt-1 font-mono-tabular text-[10px] text-[#8aa0b4]">
-                  {avgFinalityMs !== null ? "monadNewHeads 实测" : "等待 Finalized"}
+                  {avgFinalityMs !== null ? "最终状态观察值，可能受时钟偏差影响" : "等待可用的最终状态计时"}
                 </div>
               </div>
 
               <div className="hud-panel p-3.5">
                 <div className="font-mono-tabular text-[10px] uppercase tracking-wider text-[#8aa0b4]">
-                  // GAS PAID (LIMIT)
+                  // 检查交易 GAS
                 </div>
                 <div className="mt-1 font-mono-tabular text-xl font-bold text-amber-300">
                   {totalGasPaidMon.toFixed(4)} <span className="text-xs font-normal">MON</span>
                 </div>
                 <div className="mt-1 font-mono-tabular text-[10px] text-[#8aa0b4]">
-                  tx.gas × effPrice
+                  不含锁仓与退款交易
                 </div>
               </div>
             </div>
@@ -1680,7 +1689,7 @@ export default function HomePage() {
                       : "⏳ ESCROW ACTIVE (0 CHECKS RECORDED YET)"}
                   </span>
                   <span className="font-mono-tabular text-[10px] text-cyan-200">
-                    Receipt Integrity · EIP-712 Valid · Finalized
+                    读取合约记录；签名仅对本次持有的签名核验
                   </span>
                 </div>
 
@@ -1725,9 +1734,9 @@ export default function HomePage() {
               <span>// SAME-RUNHASH INDEPENDENT RE-RUN &amp; DISPUTE WINDOW</span>
             </h2>
             <p className="mt-1.5 text-xs text-[#8aa0b4]">
-              无状态反查链上 <code className="text-cyan-200">runHash</code> 对应的全部 16 种变异代码组合，独立重跑单测并逐字节比对{" "}
-              <code className="text-cyan-200">receiptHash</code>；发现 Verifier 造假即一键提交{" "}
-              <code className="text-rose-300">disputeCheck()</code> 冻结剩余资金。
+              演示服务根据链上 <code className="text-cyan-200">runHash</code> 匹配预设变异组合并复跑，
+              比对 <code className="text-cyan-200">receiptHash</code>。争议可记录冲突并停止后续结算；
+              合约不验证复跑是否诚实，也不追回已支付款项。
             </p>
 
             <div className="mt-3 flex flex-wrap gap-2">
@@ -1737,7 +1746,7 @@ export default function HomePage() {
                 disabled={busyAction !== null || !activeTaskId}
                 className="hud-chamfer-sm min-h-[38px] border border-amber-400/60 bg-amber-500/15 px-3.5 py-2 font-mono-tabular text-xs font-semibold text-amber-100 hover:bg-amber-500/25 disabled:opacity-50"
               >
-                {busyAction === "rerunning" ? "RE-RUNNING VM..." : "用相同 runHash 独立复跑核验"}
+                {busyAction === "rerunning" ? "RE-RUNNING VM..." : "在演示服务中复跑核验"}
               </button>
 
               {rerunResult?.conflict && !rerunResult.disputeTx && (
@@ -1749,7 +1758,7 @@ export default function HomePage() {
                 >
                   {busyAction === "disputing"
                     ? "SUBMITTING DISPUTE..."
-                    : "⚡ 抓包造假！提交链上 disputeCheck 冻结资金"}
+                    : "提交链上争议记录"}
                 </button>
               )}
             </div>
