@@ -20,16 +20,17 @@ let nonceLock: Promise<void> = Promise.resolve();
 // Short-TTL fee cache so streaming checks don't burn extra RPC round-trips (public RPC = 20 rps)
 let feeCache: { maxFeePerGas: bigint; maxPriorityFeePerGas: bigint; ts: number } | null = null;
 
-// Tight explicit gas limits calibrated on Monad Testnet (Monad bills gas_limit * effectiveGasPrice,
-// and un-capped eth_estimateGas can hit Monad's 3-block 10 MON reserve balance check).
+// Tight explicit gas limits calibrated by binary-probing on live Monad Testnet (10143):
+//   Direct check #0 ~= 155,000 gas | EIP-712 check ~= 146,562 (warm) / ~178,000 (cold)
+//   Dispute with reason string ~= 197,500 gas (Monad bills gas_limit * effectiveGasPrice)
 const GAS_LIMITS = {
   createTask: 250_000n,
-  recordCheckDirectPass: 195_000n,
-  recordCheckDirectHalt: 165_000n,
-  recordCheckSigPass: 225_000n,
-  recordCheckSigHalt: 195_000n,
+  recordCheckDirectPass: 170_000n,
+  recordCheckDirectHalt: 155_000n,
+  recordCheckSigPass: 195_000n,
+  recordCheckSigHalt: 175_000n,
   refundRemaining: 110_000n,
-  disputeCheck: 170_000n,
+  disputeCheck: 225_000n,
 } as const;
 
 function normalizePk(raw: string | undefined): `0x${string}` | null {
@@ -478,4 +479,197 @@ export async function disputeDemoCheckOnchain(params: {
     gasUsed: sent.gasUsed.toString(),
     actualPaidMon: formatEther(sent.gasLimit * sent.effectiveGasPrice),
   };
+}
+
+/**
+ * Monad Pipeline Burst: signs all checks locally and concurrently broadcasts them with strictly
+ * incrementing nonces so Monad's 300ms slots (150M-200M gas/block) pack up to 16 per-test
+ * attestations + micro-payouts into 1-2 blocks!
+ */
+export async function submitBurstChecksOnchain(params: {
+  taskId: `0x${string}`;
+  mode?: "direct" | "eip712";
+  checks: Array<{
+    checkIndex: number;
+    passed: boolean;
+    runHash: `0x${string}`;
+    receiptHash: `0x${string}`;
+  }>;
+}) {
+  const account = getVerifierAccount();
+  if (!account) {
+    throw new Error("VERIFIER_PRIVATE_KEY is not configured on the server");
+  }
+  const contractAddress = getContractAddress();
+  if (/^0x0+$/.test(contractAddress)) {
+    throw new Error("NEXT_PUBLIC_CONTRACT_ADDRESS is not configured");
+  }
+
+  const mode = params.mode || "direct";
+  const publicClient = getPublicClient();
+  const walletClient = createWalletClient({
+    account,
+    chain: monadTestnet,
+    transport: http(MONAD_RPC_URL),
+  });
+
+  // Allocate contiguous nonce range atomically under nonceLock
+  const count = params.checks.length;
+  let startNonce = 0;
+  let release!: () => void;
+  const prev = nonceLock;
+  nonceLock = new Promise<void>((r) => {
+    release = r;
+  });
+  await prev;
+  try {
+    const key = account.address.toLowerCase();
+    const chainNonce = await publicClient.getTransactionCount({
+      address: account.address,
+      blockTag: "pending",
+    });
+    const cur = cachedNonces.get(key);
+    startNonce = cur === undefined || chainNonce > cur ? chainNonce : cur;
+    cachedNonces.set(key, startNonce + count);
+  } finally {
+    release();
+  }
+
+  const fees = await getCachedFees();
+  const t0 = Date.now();
+
+  try {
+    // 1. Pre-sign EIP-712 attestations & raw EIP-1559 transactions locally
+    const prepared = await Promise.all(
+      params.checks.map(async (chk, i) => {
+        const signature = await walletClient.signTypedData({
+          account,
+          domain: {
+            name: "TaskRailEscrow",
+            version: "1",
+            chainId: monadTestnet.id,
+            verifyingContract: contractAddress,
+          },
+          types: EIP712_TYPES,
+          primaryType: "CheckAttestation",
+          message: {
+            taskId: params.taskId,
+            runHash: chk.runHash,
+            checkIndex: chk.checkIndex,
+            passed: chk.passed,
+            receiptHash: chk.receiptHash,
+          },
+        });
+
+        const functionName =
+          mode === "eip712" ? "recordCheckWithSig" : "recordCheckDirect";
+        const args =
+          mode === "eip712"
+            ? ([
+                params.taskId,
+                chk.checkIndex,
+                chk.passed,
+                chk.runHash,
+                chk.receiptHash,
+                signature,
+              ] as const)
+            : ([
+                params.taskId,
+                chk.checkIndex,
+                chk.passed,
+                chk.runHash,
+                chk.receiptHash,
+              ] as const);
+
+        const gasLimit =
+          mode === "eip712"
+            ? chk.passed
+              ? GAS_LIMITS.recordCheckSigPass
+              : GAS_LIMITS.recordCheckSigHalt
+            : chk.passed
+              ? GAS_LIMITS.recordCheckDirectPass
+              : GAS_LIMITS.recordCheckDirectHalt;
+
+        const data = encodeFunctionData({
+          abi: TASKRAIL_ABI,
+          functionName,
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          args: args as any,
+        });
+
+        const serialized = await walletClient.signTransaction({
+          account,
+          chain: monadTestnet,
+          to: contractAddress,
+          data,
+          value: 0n,
+          gas: gasLimit,
+          nonce: startNonce + i,
+          maxFeePerGas: fees.maxFeePerGas,
+          maxPriorityFeePerGas: fees.maxPriorityFeePerGas,
+          type: "eip1559",
+        });
+
+        return { chk, signature, gasLimit, serialized };
+      })
+    );
+
+    // 2. Fire all raw transactions concurrently!
+    const sentAtMs = Date.now();
+    const hashes = await Promise.all(
+      prepared.map((p) =>
+        publicClient.sendRawTransaction({ serializedTransaction: p.serialized })
+      )
+    );
+    const broadcastMs = Date.now() - sentAtMs;
+
+    // 3. Await all receipts concurrently
+    const receipts = await Promise.all(
+      hashes.map((hash) =>
+        publicClient.waitForTransactionReceipt({
+          hash,
+          pollingInterval: 250,
+          timeout: 25_000,
+        })
+      )
+    );
+    const allConfirmedMs = Date.now() - sentAtMs;
+
+    const results: AttestTxResult[] = receipts.map((receipt, idx) => {
+      if (receipt.status !== "success") {
+        throw new Error(
+          `Burst check #${prepared[idx].chk.checkIndex} reverted onchain (tx=${hashes[idx]})`
+        );
+      }
+      const gasLimit = prepared[idx].gasLimit;
+      return {
+        txHash: hashes[idx],
+        mode,
+        syncRpcUsed: false,
+        signature: prepared[idx].signature,
+        verifierAddress: account.address,
+        sentAtMs,
+        proposedAtMs: sentAtMs + allConfirmedMs,
+        proposedLatencyMs: allConfirmedMs,
+        blockNumber: receipt.blockNumber.toString(),
+        gasLimit: gasLimit.toString(),
+        gasUsed: receipt.gasUsed.toString(),
+        effectiveGasPrice: receipt.effectiveGasPrice.toString(),
+        actualPaidMon: formatEther(gasLimit * receipt.effectiveGasPrice),
+        txStatus: receipt.status,
+      };
+    });
+
+    const spannedBlocks = [...new Set(results.map((r) => r.blockNumber))].sort();
+    return {
+      totalSignAndSendMs: Date.now() - t0,
+      broadcastMs,
+      allConfirmedMs,
+      spannedBlocks,
+      results,
+    };
+  } catch (err) {
+    resetNonceCache(account.address);
+    throw err;
+  }
 }

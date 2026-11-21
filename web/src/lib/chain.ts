@@ -1,26 +1,34 @@
-import { createPublicClient, http } from "viem";
+import { createPublicClient, fallback, http } from "viem";
 import { monadTestnet } from "viem/chains";
 
 export const MONAD_RPC_URL =
   process.env.NEXT_PUBLIC_MONAD_RPC || "https://testnet-rpc.monad.xyz";
+
+export const MONAD_BACKUP_RPCS = [
+  "https://rpc.ankr.com/monad_testnet",
+  "https://rpc-testnet.monadinfra.com",
+] as const;
 
 export const MONAD_WSS_URL =
   process.env.NEXT_PUBLIC_MONAD_WSS || "wss://testnet-rpc.monad.xyz";
 
 export const MONAD_EXPLORER_URL = "https://testnet.monadscan.com";
 
-export function getPublicClient() {
-  return createPublicClient({
-    chain: monadTestnet,
-    transport: http(MONAD_RPC_URL, {
-      retryCount: 2,
-      retryDelay: 300,
-    }),
-  });
-}
-
 export const DEFAULT_DEPLOYED_CONTRACT =
   "0x726f083ae7a6f9a1c2422dcd87c794fe8c88c938" as const;
+
+export function getPublicClient() {
+  const transports = [
+    http(MONAD_RPC_URL, { retryCount: 2, retryDelay: 250, timeout: 12_000 }),
+    ...MONAD_BACKUP_RPCS.filter((u) => u !== MONAD_RPC_URL).map((u) =>
+      http(u, { retryCount: 1, retryDelay: 250, timeout: 10_000 })
+    ),
+  ];
+  return createPublicClient({
+    chain: monadTestnet,
+    transport: fallback(transports, { rank: false }),
+  });
+}
 
 export function getContractAddress(): `0x${string}` {
   const addr = process.env.NEXT_PUBLIC_CONTRACT_ADDRESS;

@@ -13,6 +13,10 @@
   - `Check #01 (UNIT · +0.064 MON)`：[`0xe9a2624c...`](https://testnet.monadscan.com/tx/0xe9a2624c8dd3b43a4f3d7fdbfc805fa3553b7e07e7ad5bf077e1d3acb253337e)（Proposed 156ms / Finalized 772ms）
   - `Check #05 (ACL FAIL -> HALTED)`：[`0x2cea99c0...`](https://testnet.monadscan.com/tx/0x2cea99c0270b18c4756210de15309cc3aeee33d00e933ed299dd383f878de188)（Finalized 1218ms）
   - `refundRemaining (1.28 MON)`：[`0xc73bd141...`](https://testnet.monadscan.com/tx/0xc73bd141200d8743591a0aeb8218f6ede8ca0e395c98b57982614b0b68146c0f)（284ms）
+- **Monad Testnet 全分支极限压测实录（`benchmark-all-paths.ts`）**：
+  - **16 笔逐用例并发齐射（Pipeline Burst）**：16 笔真实测试校验与微打款全部打包进 **同一个 300ms Monad 区块 (`#81491937`)**，16/16 成功，总入账 `1.6 MON`，合约余额精确归 `0 wei`（首笔 [`0xcf0f4caf...`](https://testnet.monadscan.com/tx/0xcf0f4caf49a748dcdf39a90e97e8e27db960aed219447dedb6455053c10cddf7) ～ 末笔 [`0x829fe5f1...`](https://testnet.monadscan.com/tx/0x829fe5f122ceba1f34fc16b78cab4f64d43308a32ccca97994f1f882296e221b)）
+  - **EIP-712 链上无许可中继验签**：[`0x7326f6e3...`](https://testnet.monadscan.com/tx/0x7326f6e339593e1b5e6046b3afde32390305f2956d7564d581db9ce6063a56fb)（实付 `0.01617 MON`）
+  - **同 `runHash` 链上争议冻结 (`disputeCheck`) + 退款**：[`0x28e48e42...`](https://testnet.monadscan.com/tx/0x28e48e423c3484ca3d9dd5366bdab2052ce966dd983bfdb21de0700910acf646) → [`0x18720005...`](https://testnet.monadscan.com/tx/0x1872000530dda3d9d90e56bee697bef7ad4defab0998c97f98b3f5881bbf8557)
 
 ## 一句话说明
 

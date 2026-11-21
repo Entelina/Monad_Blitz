@@ -163,6 +163,13 @@ export default function HomePage() {
   ]);
 
   const [streamItems, setStreamItems] = useState<StreamCheckItem[]>([]);
+  const [burstSummary, setBurstSummary] = useState<{
+    count: number;
+    sandboxTotalMs: number;
+    broadcastMs: number;
+    allConfirmedMs: number;
+    spannedBlocks: string[];
+  } | null>(null);
   const [verifyTaskInput, setVerifyTaskInput] = useState<string>("");
   const [verifyResult, setVerifyResult] = useState<IndependentVerifyResult | null>(null);
   const [rerunResult, setRerunResult] = useState<RerunResult | null>(null);
@@ -310,6 +317,7 @@ export default function HomePage() {
     setRefundTxHash(null);
     setTaskStatus("IDLE");
     setStreamItems([]);
+    setBurstSummary(null);
     setVerifyResult(null);
     setRerunResult(null);
     setErrorBanner(null);
@@ -324,6 +332,7 @@ export default function HomePage() {
     setBusyAction("locking");
     setRefundTxHash(null);
     setStreamItems([]);
+    setBurstSummary(null);
     setVerifyResult(null);
     setRerunResult(null);
 
@@ -539,6 +548,118 @@ export default function HomePage() {
     const tid = await handleLockEscrow();
     if (tid) {
       await runVerificationStream(tid);
+    }
+  };
+
+  const handlePipelineBurstDemo = async () => {
+    const tid = await handleLockEscrow();
+    if (!tid) return;
+    setErrorBanner(null);
+    setBusyAction("bursting");
+    setBurstSummary(null);
+
+    pushTerminal(
+      `$ pipeline-burst --task ${shortHex(tid, 10, 6)} --patch ${patchId} --mode ${submitMode} --concurrent-nonces`,
+      "info"
+    );
+
+    try {
+      const res = await fetch("/api/run-burst", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          taskId: tid,
+          patchId,
+          mode: submitMode,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Pipeline burst failed");
+
+      let runningPaid = 0;
+      const mapped: StreamCheckItem[] = data.items.map(
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        (entry: any) => {
+          const exec = entry.execution;
+          const chain = entry.chain;
+          const attestedPassed: boolean = entry.attested.passed;
+          const isLast = exec.checkIndex === totalChecks - 1;
+          const payout = attestedPassed
+            ? isLast
+              ? Math.max(0, totalRewardNum - runningPaid)
+              : stepPayoutMon
+            : 0;
+          runningPaid += payout;
+
+          pushTerminal(`${exec.stdout} (${exec.durationMs}ms)`, exec.passed ? "pass" : "fail");
+
+          const existingState = trackerRef.current?.getBlockState(chain.blockNumber);
+          const initialCommitState: MonadCommitState = existingState || "Proposed";
+          const isAlreadyFinal =
+            initialCommitState === "Finalized" || initialCommitState === "Verified";
+
+          return {
+            checkIndex: exec.checkIndex,
+            stage: exec.spec.stage,
+            testId: exec.spec.id,
+            name: exec.spec.name,
+            passed: exec.passed,
+            attestedPassed,
+            simulatedDishonest: false,
+            durationMs: exec.durationMs,
+            stdout: exec.stdout,
+            errorMessage: exec.errorMessage,
+            runHash: exec.runHash,
+            receiptHash: exec.receiptHash,
+            attestedReceiptHash: entry.attested.receiptHash,
+            txHash: chain.txHash,
+            mode: chain.mode,
+            signature: chain.signature,
+            verifierAddress: chain.verifierAddress,
+            sentAtMs: chain.sentAtMs,
+            proposedLatencyMs: chain.proposedLatencyMs,
+            finalizedLatencyMs: isAlreadyFinal ? chain.proposedLatencyMs : undefined,
+            commitState: initialCommitState,
+            blockNumber: chain.blockNumber,
+            gasLimit: chain.gasLimit,
+            gasUsed: chain.gasUsed,
+            actualPaidMon: chain.actualPaidMon,
+            payoutMon: payout.toFixed(4),
+          };
+        }
+      );
+
+      setStreamItems(mapped);
+      setBurstSummary({
+        count: mapped.length,
+        sandboxTotalMs: data.sandboxTotalMs,
+        broadcastMs: data.broadcastMs,
+        allConfirmedMs: data.allConfirmedMs,
+        spannedBlocks: data.spannedBlocks,
+      });
+
+      if (data.halted) {
+        setTaskStatus("HALTED");
+        pushTerminal(
+          `[BURST HALTED] ${mapped.length} txs packed in ${data.spannedBlocks.length} Monad block(s) (${data.allConfirmedMs}ms) -> HALTED! Remaining ${(totalRewardNum - runningPaid).toFixed(4)} MON ready for refund.`,
+          "fail"
+        );
+      } else {
+        setTaskStatus("COMPLETED");
+        pushTerminal(
+          `[MONAD BURST COMPLETED] ${mapped.length}/16 per-test txs broadcast in ${data.broadcastMs}ms, all confirmed in ${data.allConfirmedMs}ms across ${data.spannedBlocks.length} Monad 300ms block(s) (#${data.spannedBlocks[0]}..#${data.spannedBlocks[data.spannedBlocks.length - 1]})! Total paid: ${totalRewardNum.toFixed(4)} MON.`,
+          "chain"
+        );
+      }
+      setLiveAnnouncement(
+        `Monad 并发齐射完成：${mapped.length} 笔真实测试验证交易打包进 ${data.spannedBlocks.length} 个区块`
+      );
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      setErrorBanner(msg);
+      pushTerminal(`[ERROR] Pipeline burst failed: ${msg}`, "fail");
+    } finally {
+      setBusyAction(null);
     }
   };
 
@@ -942,7 +1063,21 @@ export default function HomePage() {
                   ? "正在 Monad 锁仓..."
                   : busyAction === "streaming"
                     ? `正在流式验证上链 (${streamItems.length}/${totalChecks})...`
-                    : "一键全自动演示（锁仓 → 真实跑测 → 流式上链）"}
+                    : "一键逐条流式演示（锁仓 → 真实跑测 → 逐笔上链）"}
+              </span>
+            </button>
+
+            <button
+              type="button"
+              onClick={handlePipelineBurstDemo}
+              disabled={busyAction !== null || !status?.contractReady || simulateDishonest}
+              className="flex min-h-[40px] items-center gap-2 rounded-lg border border-emerald-400/70 bg-emerald-600/25 px-4 py-2 text-sm font-semibold text-emerald-100 hover:bg-emerald-600/40 disabled:opacity-50"
+            >
+              <Flame className="h-4 w-4 text-emerald-300" aria-hidden="true" />
+              <span>
+                {busyAction === "bursting"
+                  ? "Monad 并发齐射中..."
+                  : "⚡ 并发齐射模式（Nonce 流水线压榨 Monad 300ms 区块）"}
               </span>
             </button>
 
@@ -1196,6 +1331,23 @@ export default function HomePage() {
                   {stepPayoutMon.toFixed(4)} MON + 末项 40% 尾款
                 </span>
               </div>
+
+              {burstSummary && (
+                <div className="mb-3 flex flex-wrap items-center justify-between gap-2 rounded-lg border border-emerald-400/50 bg-emerald-950/35 px-3 py-2 font-mono-tabular text-xs text-emerald-100">
+                  <span className="font-semibold">
+                    ⚡ MONAD PIPELINE BURST: {burstSummary.count} 笔真实测试验证交易打包进{" "}
+                    {burstSummary.spannedBlocks.length} 个 Monad 区块（#
+                    {burstSummary.spannedBlocks[0]}
+                    {burstSummary.spannedBlocks.length > 1
+                      ? `..#${burstSummary.spannedBlocks[burstSummary.spannedBlocks.length - 1]}`
+                      : ""}
+                    ）
+                  </span>
+                  <span className="text-emerald-300">
+                    沙盒 {burstSummary.sandboxTotalMs}ms · 齐射广播 {burstSummary.broadcastMs}ms · 全确认 {burstSummary.allConfirmedMs}ms
+                  </span>
+                </div>
+              )}
 
               <div className="h-[465px] space-y-2 overflow-y-auto pr-1">
                 {(status?.tests || []).map((spec) => {
