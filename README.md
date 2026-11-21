@@ -3,15 +3,16 @@
 > **Per-Test-Case Live Code Verification & Atomic Micro-Escrow on Monad Testnet**  
 > Built from scratch at **Monad Blitz@广州** (`eventId=18`).
 
-## 已部署合约与真实链上记录（Monad Testnet · Chain ID `10143`）
+## 已部署公网应用与真实链上记录（Monad Testnet · Chain ID `10143`）
 
-- **核心合约 `TaskRailEscrow`**：[`0x726f083ae7a6f9a1c2422dcd87c794fe8c88c938`](https://testnet.monadscan.com/address/0x726f083ae7a6f9a1c2422dcd87c794fe8c88c938)
+- **公网 Live Demo（Vercel）**：https://monad-blitz-eight.vercel.app
+- **核心合约 `TaskRailEscrow`（已通过 Monadscan & MonadVision 双浏览器源码验证）**：[`0x726f083ae7a6f9a1c2422dcd87c794fe8c88c938`](https://testnet.monadscan.com/address/0x726f083ae7a6f9a1c2422dcd87c794fe8c88c938)
 - **部署交易**：[`0x78a575a65a3eb64a42e73b0e207134e00c724985d7f20d4a06938d413778afca`](https://testnet.monadscan.com/tx/0x78a575a65a3eb64a42e73b0e207134e00c724985d7f20d4a06938d413778afca)（Block `#81483116`）
-- **端到端实测完整闭环记录（PR #143 越权漏洞版：锁仓 → 5 条流式放款 → Check #5 熔断 → 独立读链核验 6/6 Valid → 一键退款 `1.28 MON`）**：
-  - `createTask (1.6 MON)`：[`0x6f0e4404...`](https://testnet.monadscan.com/tx/0x6f0e4404e19028259aa0aa7225e34e4d2e1447948c52caf1da9c4afee08a75ca)（1200ms）
-  - `Check #00 (BUILD · +0.064 MON)`：[`0x3a49491d...`](https://testnet.monadscan.com/tx/0x3a49491da3afff87d53df6077fc64c64c8518da10be0ef2a9816b997884d1afd)（Finalized 1281ms）
-  - `Check #05 (ACL FAIL -> HALTED)`：[`0x136efd51...`](https://testnet.monadscan.com/tx/0x136efd5168feae7547c21db3229a7fc7cfc53fc4dd4db19615962e83a472f989)（Finalized 1389ms）
-  - `refundRemaining (1.28 MON)`：[`0x167a8e8a...`](https://testnet.monadscan.com/tx/0x167a8e8a65b3d5af75dda72bed90d8e41cf214e51a701846c6dee5e28d4711ba)（735ms）
+- **公网端到端实测记录（PR #143 越权漏洞版：6 秒跑完锁仓 → 5 笔流式放款 → Check #5 熔断 → 独立读链核验 6/6 Valid → 284ms 一键退款 `1.28 MON`）**：
+  - `createTask (1.6 MON)`：[`0x56904067...`](https://testnet.monadscan.com/tx/0x569040675bff7723f3adbfd63460c448a1f246ec3ee09aa9b1de34c74cf88c28)（626ms）
+  - `Check #01 (UNIT · +0.064 MON)`：[`0xe9a2624c...`](https://testnet.monadscan.com/tx/0xe9a2624c8dd3b43a4f3d7fdbfc805fa3553b7e07e7ad5bf077e1d3acb253337e)（Proposed 156ms / Finalized 772ms）
+  - `Check #05 (ACL FAIL -> HALTED)`：[`0x2cea99c0...`](https://testnet.monadscan.com/tx/0x2cea99c0270b18c4756210de15309cc3aeee33d00e933ed299dd383f878de188)（Finalized 1218ms）
+  - `refundRemaining (1.28 MON)`：[`0xc73bd141...`](https://testnet.monadscan.com/tx/0xc73bd141200d8743591a0aeb8218f6ede8ca0e395c98b57982614b0b68146c0f)（284ms）
 
 ## 一句话说明
 
