@@ -3,20 +3,26 @@
 > **Per-Test-Case Live Code Verification & Atomic Micro-Escrow on Monad Testnet**  
 > Built from scratch at **Monad Blitz@广州** (`eventId=18`).
 
+![TaskRail Stream Live Cockpit on Monad Testnet](docs/preview.png)
+
 ## 已部署公网应用与真实链上记录（Monad Testnet · Chain ID `10143`）
 
 - **公网 Live Demo（Vercel）**：https://monad-blitz-eight.vercel.app
 - **核心合约 `TaskRailEscrow`（已通过 Monadscan & MonadVision 双浏览器源码验证）**：[`0x726f083ae7a6f9a1c2422dcd87c794fe8c88c938`](https://testnet.monadscan.com/address/0x726f083ae7a6f9a1c2422dcd87c794fe8c88c938)
 - **部署交易**：[`0x78a575a65a3eb64a42e73b0e207134e00c724985d7f20d4a06938d413778afca`](https://testnet.monadscan.com/tx/0x78a575a65a3eb64a42e73b0e207134e00c724985d7f20d4a06938d413778afca)（Block `#81483116`）
-- **公网端到端实测记录（PR #143 越权漏洞版：6 秒跑完锁仓 → 5 笔流式放款 → Check #5 熔断 → 独立读链核验 6/6 Valid → 284ms 一键退款 `1.28 MON`）**：
-  - `createTask (1.6 MON)`：[`0x56904067...`](https://testnet.monadscan.com/tx/0x569040675bff7723f3adbfd63460c448a1f246ec3ee09aa9b1de34c74cf88c28)（626ms）
-  - `Check #01 (UNIT · +0.064 MON)`：[`0xe9a2624c...`](https://testnet.monadscan.com/tx/0xe9a2624c8dd3b43a4f3d7fdbfc805fa3553b7e07e7ad5bf077e1d3acb253337e)（Proposed 156ms / Finalized 772ms）
-  - `Check #05 (ACL FAIL -> HALTED)`：[`0x2cea99c0...`](https://testnet.monadscan.com/tx/0x2cea99c0270b18c4756210de15309cc3aeee33d00e933ed299dd383f878de188)（Finalized 1218ms）
-  - `refundRemaining (1.28 MON)`：[`0xc73bd141...`](https://testnet.monadscan.com/tx/0xc73bd141200d8743591a0aeb8218f6ede8ca0e395c98b57982614b0b68146c0f)（284ms）
-- **Monad Testnet 全分支极限压测实录（`benchmark-all-paths.ts`）**：
-  - **16 笔逐用例并发齐射（Pipeline Burst）**：16 笔真实测试校验与微打款全部打包进 **同一个 300ms Monad 区块 (`#81491937`)**，16/16 成功，总入账 `1.6 MON`，合约余额精确归 `0 wei`（首笔 [`0xcf0f4caf...`](https://testnet.monadscan.com/tx/0xcf0f4caf49a748dcdf39a90e97e8e27db960aed219447dedb6455053c10cddf7) ～ 末笔 [`0x829fe5f1...`](https://testnet.monadscan.com/tx/0x829fe5f122ceba1f34fc16b78cab4f64d43308a32ccca97994f1f882296e221b)）
-  - **EIP-712 链上无许可中继验签**：[`0x7326f6e3...`](https://testnet.monadscan.com/tx/0x7326f6e339593e1b5e6046b3afde32390305f2956d7564d581db9ce6063a56fb)（实付 `0.01617 MON`）
-  - **同 `runHash` 链上争议冻结 (`disputeCheck`) + 退款**：[`0x28e48e42...`](https://testnet.monadscan.com/tx/0x28e48e423c3484ca3d9dd5366bdab2052ce966dd983bfdb21de0700910acf646) → [`0x18720005...`](https://testnet.monadscan.com/tx/0x1872000530dda3d9d90e56bee697bef7ad4defab0998c97f98b3f5881bbf8557)
+- **公网实测 1｜PR #142 零漏洞 · 16 笔 Monad 并发齐射（Pipeline Burst）**：
+  - 16 笔真实测试验证与微打款 **全部打包进同 1 个 Monad 区块（`#81498925`）**，VM `52.57ms` / Broadcast `405ms` / Confirmed `1643ms`，Agent 精准入账 `1.6000 MON`（含第 16 项 `+0.6400 MON` 尾款，`0 wei` 尘埃）
+  - `createTask (1.6 MON)`：[`0xd7bf6fde...`](https://testnet.monadscan.com/tx/0xd7bf6fde228f539aa75f49b635a6aa0b5e401a6cc04b3fa57aa89c2fa590b65c)（`407ms`，Block `#81498921`）
+  - Check #00 ～ Check #15（Block `#81498925`）：首笔 [`0xbe008a46...`](https://testnet.monadscan.com/tx/0xbe008a464fc07b7afce450d6dbbb6fcbc60a226bf1c7fff9de84132c1a338fb2) ～ 末笔 [`0x762e6046...`](https://testnet.monadscan.com/tx/0x762e604628277f9c402020fa7d432e94c14bde4aa72dcccb820f07f210015d10)
+- **公网实测 2｜Live Bug Mutator 动态漏洞注入（`FEE ×10 BUG`）→ Check #04 精准熔断 & 365ms 退款**：
+  - 现场勾选 `破坏手续费 BigInt 分母精度` 动态重写源码并重算 `runHash`，沙盒实跑通过前 4 项（`+0.2560 MON`），Check #04 抛出 `AssertionError (expected=25, actual=250)` 当场触发链上 `HALTED`，一键退回 `1.3440 MON`
+  - `createTask (1.6 MON)`：[`0xe0af0027...`](https://testnet.monadscan.com/tx/0xe0af00279d511ed8b83bc3940b169f5f2bdb0bc8933ad7376e67f18a36cef119)（`360ms`）
+  - `Check #04 (FEE ×10 FAIL -> HALTED)`：[`0x90244cf6...`](https://testnet.monadscan.com/tx/0x90244cf6cac570d96c6a906463f578882d50137f99c4a3d2d563ffee5d537ad4)（Block `#81499024`，Finalized `1087ms`）
+  - `refundRemaining (1.3440 MON)`：[`0x2225c8a9...`](https://testnet.monadscan.com/tx/0x2225c8a92806146740de033b96b6b0b2c20a6dc01e392ba981a7a5c7c36df5ad)（`365ms`）
+- **公网实测 3｜PR #143 越权漏洞版 + EIP-712 无许可中继 + 同 `runHash` 链上争议冻结**：
+  - PR #143 Check #05 ACL 熔断：[`0x2cea99c0...`](https://testnet.monadscan.com/tx/0x2cea99c0270b18c4756210de15309cc3aeee33d00e933ed299dd383f878de188) → 退款 `1.28 MON`：[`0xc73bd141...`](https://testnet.monadscan.com/tx/0xc73bd141200d8743591a0aeb8218f6ede8ca0e395c98b57982614b0b68146c0f)（`284ms`）
+  - EIP-712 链上无许可中继验签：[`0x7326f6e3...`](https://testnet.monadscan.com/tx/0x7326f6e339593e1b5e6046b3afde32390305f2956d7564d581db9ce6063a56fb)（实付 `0.01617 MON`）
+  - 同 `runHash` 链上争议冻结 (`disputeCheck`) + 退款：[`0x28e48e42...`](https://testnet.monadscan.com/tx/0x28e48e423c3484ca3d9dd5366bdab2052ce966dd983bfdb21de0700910acf646) → [`0x18720005...`](https://testnet.monadscan.com/tx/0x1872000530dda3d9d90e56bee697bef7ad4defab0998c97f98b3f5881bbf8557)
 
 ## 一句话说明
 
