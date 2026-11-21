@@ -1,0 +1,68 @@
+@import "tailwindcss";
+
+:root {
+  color-scheme: dark;
+  --bg-canvas: #0b0b12;
+  --bg-panel: #12131f;
+  --bg-panel-elevated: #181a2a;
+  --border-subtle: #272940;
+  --border-strong: #3e4166;
+  --text-primary: #f4f4f8;
+  --text-secondary: #a7abc4;
+  --accent-monad: #836ef9;
+  --accent-monad-bright: #a796ff;
+  --scrollbar-thumb: #3b3e5e;
+  --scrollbar-track: #11121d;
+  accent-color: var(--accent-monad);
+  scrollbar-color: var(--scrollbar-thumb) var(--scrollbar-track);
+}
+
+@supports not (scrollbar-color: auto) {
+  *::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+  *::-webkit-scrollbar-thumb {
+    background: var(--scrollbar-thumb);
+    border-radius: 6px;
+  }
+  *::-webkit-scrollbar-track {
+    background: var(--scrollbar-track);
+  }
+}
+
+html,
+body {
+  background-color: var(--bg-canvas);
+  color: var(--text-primary);
+  font-family: system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+  min-height: 100vh;
+}
+
+.font-mono-tabular {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-variant-numeric: tabular-nums;
+}
+
+:where(a:any-link, button, input, select):focus-visible {
+  outline: 2px solid var(--accent-monad-bright);
+  outline-offset: 2px;
+}
+
+.skip-link:where(:not(:focus-within, :active)) {
+  position: absolute !important;
+  clip-path: inset(50%) !important;
+  overflow: hidden !important;
+  width: 1px !important;
+  height: 1px !important;
+  margin: -1px !important;
+  padding: 0 !important;
+  border: 0 !important;
+  white-space: nowrap !important;
+}
+
+@media (forced-colors: active) {
+  .panel-card {
+    border: 1px solid CanvasText;
+  }
+}

@@ -1,0 +1,34 @@
+# Secrets & local state
+.env
+.env.*
+!.env.example
+.mojo/
+.npmrc
+**/.npmrc
+
+# Local agent workspace configs
+.agents/
+.claude/
+AGENTS.md
+skills-lock.json
+
+# Dependencies
+node_modules/
+.pnpm-store/
+
+# Contracts build artifacts
+contracts/artifacts/
+contracts/cache/
+contracts/typechain-types/
+contracts/out/
+contracts/broadcast/
+
+# Next.js / Vercel
+web/.next/
+web/out/
+web/.vercel/
+
+# OS & logs
+.DS_Store
+Thumbs.db
+*.log

@@ -1,0 +1,23 @@
+{
+  "name": "taskrail-stream-contracts",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "compile": "hardhat compile",
+    "test": "hardhat test",
+    "deploy:testnet": "hardhat run scripts/deploy.ts --network monadTestnet",
+    "verify:testnet": "tsx scripts/verify.ts",
+    "smoke:testnet": "tsx scripts/smoke-test.ts"
+  },
+  "devDependencies": {
+    "@nomicfoundation/hardhat-toolbox-viem": "^3.0.0",
+    "@nomicfoundation/hardhat-viem": "^2.0.1",
+    "@openzeppelin/contracts": "^5.1.0",
+    "dotenv": "^16.4.7",
+    "hardhat": "^2.22.19",
+    "solc": "0.8.28",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2",
+    "viem": "^2.40.0"
+  }
+}
