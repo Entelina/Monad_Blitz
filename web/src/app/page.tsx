@@ -809,14 +809,14 @@ export default function HomePage() {
             role="alert"
             className="flex items-start justify-between gap-3 rounded-xl border border-rose-500/60 bg-rose-950/50 px-4 py-3 text-sm text-rose-100"
           >
-            <div className="flex items-start gap-2">
+            <div className="flex min-w-0 flex-1 items-start gap-2">
               <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-rose-400" aria-hidden="true" />
-              <span>{errorBanner}</span>
+              <span className="break-all">{errorBanner}</span>
             </div>
             <button
               type="button"
               onClick={() => setErrorBanner(null)}
-              className="text-xs underline text-rose-200 hover:text-white"
+              className="shrink-0 text-xs underline text-rose-200 hover:text-white"
             >
               关闭
             </button>
@@ -1148,7 +1148,7 @@ export default function HomePage() {
                       : "合约剩余锁定"}
                 </div>
                 <div className="mt-1 font-mono-tabular text-xl font-bold text-white">
-                  {taskStatus === "REFUNDED" ? "0.0000" : remainingMon.toFixed(4)}{" "}
+                  {remainingMon.toFixed(4)}{" "}
                   <span className="text-xs font-normal text-[#a7abc4]">MON</span>
                 </div>
                 <div className="mt-1 text-[11px] font-medium text-violet-300">
@@ -1337,10 +1337,22 @@ export default function HomePage() {
             </div>
 
             {verifyResult && (
-              <div className="mt-3 rounded-lg border border-emerald-500/50 bg-emerald-950/25 p-3 text-xs">
+              <div
+                className={`mt-3 rounded-lg border p-3 text-xs ${
+                  verifyResult.recordedCount > 0
+                    ? "border-emerald-500/50 bg-emerald-950/25"
+                    : "border-amber-500/50 bg-amber-950/25"
+                }`}
+              >
                 <div className="flex flex-wrap items-center justify-between gap-2">
-                  <span className="font-mono-tabular text-sm font-bold text-emerald-300">
-                    ✓ ON-CHAIN ATTESTATION VERIFIED
+                  <span
+                    className={`font-mono-tabular text-sm font-bold ${
+                      verifyResult.recordedCount > 0 ? "text-emerald-300" : "text-amber-300"
+                    }`}
+                  >
+                    {verifyResult.recordedCount > 0
+                      ? "✓ ON-CHAIN ATTESTATION VERIFIED"
+                      : "⏳ ESCROW ACTIVE (0 CHECKS RECORDED YET)"}
                   </span>
                   <span className="font-mono-tabular text-[11px] text-emerald-200">
                     Receipt Integrity · Signature Valid · Chain Record Finalized

@@ -7,10 +7,11 @@
 
 - **核心合约 `TaskRailEscrow`**：[`0x726f083ae7a6f9a1c2422dcd87c794fe8c88c938`](https://testnet.monadscan.com/address/0x726f083ae7a6f9a1c2422dcd87c794fe8c88c938)
 - **部署交易**：[`0x78a575a65a3eb64a42e73b0e207134e00c724985d7f20d4a06938d413778afca`](https://testnet.monadscan.com/tx/0x78a575a65a3eb64a42e73b0e207134e00c724985d7f20d4a06938d413778afca)（Block `#81483116`）
-- **实测冒烟交易**：
-  - `createTask`：[`0x85a4190c8bbbb72e30d626d55f3e0f9b1917f74ca0dfda554d869d15d70fd364`](https://testnet.monadscan.com/tx/0x85a4190c8bbbb72e30d626d55f3e0f9b1917f74ca0dfda554d869d15d70fd364)（实付 `0.02244 MON`）
-  - `recordCheckDirect (PASS)`：[`0xba16e496f020a35e2052dfc7542684660102074784fc5e6f6ba74371ec38dc6c`](https://testnet.monadscan.com/tx/0xba16e496f020a35e2052dfc7542684660102074784fc5e6f6ba74371ec38dc6c)（实付 `0.01632 MON`）
-  - `recordCheckDirect (HALT)`：[`0xb2d43fd0255c22171831873f602994ffa051d0e50b5f94680dc39473dc9acc32`](https://testnet.monadscan.com/tx/0xb2d43fd0255c22171831873f602994ffa051d0e50b5f94680dc39473dc9acc32)（实付 `0.01428 MON`）
+- **端到端实测完整闭环记录（PR #143 越权漏洞版：锁仓 → 5 条流式放款 → Check #5 熔断 → 独立读链核验 6/6 Valid → 一键退款 `1.28 MON`）**：
+  - `createTask (1.6 MON)`：[`0x6f0e4404...`](https://testnet.monadscan.com/tx/0x6f0e4404e19028259aa0aa7225e34e4d2e1447948c52caf1da9c4afee08a75ca)（1200ms）
+  - `Check #00 (BUILD · +0.064 MON)`：[`0x3a49491d...`](https://testnet.monadscan.com/tx/0x3a49491da3afff87d53df6077fc64c64c8518da10be0ef2a9816b997884d1afd)（Finalized 1281ms）
+  - `Check #05 (ACL FAIL -> HALTED)`：[`0x136efd51...`](https://testnet.monadscan.com/tx/0x136efd5168feae7547c21db3229a7fc7cfc53fc4dd4db19615962e83a472f989)（Finalized 1389ms）
+  - `refundRemaining (1.28 MON)`：[`0x167a8e8a...`](https://testnet.monadscan.com/tx/0x167a8e8a65b3d5af75dda72bed90d8e41cf214e51a701846c6dee5e28d4711ba)（735ms）
 
 ## 一句话说明
 

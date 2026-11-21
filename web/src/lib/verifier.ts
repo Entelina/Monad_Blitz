@@ -13,9 +13,24 @@ import { monadTestnet } from "viem/chains";
 import { EIP712_TYPES, TASKRAIL_ABI } from "./abi";
 import { getContractAddress, getPublicClient, MONAD_RPC_URL } from "./chain";
 
-// In-memory nonce lock per server instance to prevent collisions during rapid 16-check streaming
-let cachedNonce: number | null = null;
+// Per-address in-memory nonce manager to support rapid streaming without collisions
+const cachedNonces = new Map<string, number>();
 let nonceLock: Promise<void> = Promise.resolve();
+
+// Short-TTL fee cache so streaming checks don't burn extra RPC round-trips (public RPC = 20 rps)
+let feeCache: { maxFeePerGas: bigint; maxPriorityFeePerGas: bigint; ts: number } | null = null;
+
+// Tight explicit gas limits calibrated on Monad Testnet (Monad bills gas_limit * effectiveGasPrice,
+// and un-capped eth_estimateGas can hit Monad's 3-block 10 MON reserve balance check).
+const GAS_LIMITS = {
+  createTask: 250_000n,
+  recordCheckDirectPass: 195_000n,
+  recordCheckDirectHalt: 165_000n,
+  recordCheckSigPass: 225_000n,
+  recordCheckSigHalt: 195_000n,
+  refundRemaining: 110_000n,
+  disputeCheck: 170_000n,
+} as const;
 
 function normalizePk(raw: string | undefined): `0x${string}` | null {
   if (!raw) return null;
@@ -41,8 +56,7 @@ export function getDefaultAgentAddress(): `0x${string}` {
   if (envAddr && envAddr.startsWith("0x") && envAddr.length === 42 && !/^0x0+$/.test(envAddr)) {
     return envAddr as `0x${string}`;
   }
-  // Deterministic demo AI agent payout address (distinct from employer/verifier)
-  return "0x70997970C51812dc3A010C7d01b50e0d17dc79C8";
+  return "0x4AfcF8169183217601a1948EE6e08d7caf31A33F";
 }
 
 async function allocateNonce(address: `0x${string}`): Promise<number> {
@@ -53,24 +67,55 @@ async function allocateNonce(address: `0x${string}`): Promise<number> {
   });
   await prev;
   try {
+    const key = address.toLowerCase();
     const publicClient = getPublicClient();
     const chainNonce = await publicClient.getTransactionCount({
       address,
       blockTag: "pending",
     });
-    if (cachedNonce === null || chainNonce > cachedNonce) {
-      cachedNonce = chainNonce;
-    }
-    const assigned = cachedNonce;
-    cachedNonce += 1;
+    const cur = cachedNonces.get(key);
+    const assigned = cur === undefined || chainNonce > cur ? chainNonce : cur;
+    cachedNonces.set(key, assigned + 1);
     return assigned;
   } finally {
     release();
   }
 }
 
-export function resetNonceCache() {
-  cachedNonce = null;
+export function resetNonceCache(address?: `0x${string}`) {
+  if (address) {
+    cachedNonces.delete(address.toLowerCase());
+  } else {
+    cachedNonces.clear();
+  }
+}
+
+async function getCachedFees() {
+  const now = Date.now();
+  if (feeCache && now - feeCache.ts < 15_000) {
+    return feeCache;
+  }
+  try {
+    const publicClient = getPublicClient();
+    const fees = await publicClient.estimateFeesPerGas();
+    // Monad minimum base fee is 100 gwei; keep tight cap to avoid reserve balance spikes
+    const maxFeePerGas =
+      fees.maxFeePerGas && fees.maxFeePerGas > 105_000_000_000n
+        ? fees.maxFeePerGas
+        : 115_000_000_000n;
+    const maxPriorityFeePerGas =
+      fees.maxPriorityFeePerGas && fees.maxPriorityFeePerGas > 1_000_000_000n
+        ? fees.maxPriorityFeePerGas
+        : 2_000_000_000n;
+    feeCache = { maxFeePerGas, maxPriorityFeePerGas, ts: now };
+    return feeCache;
+  } catch {
+    return {
+      maxFeePerGas: 115_000_000_000n,
+      maxPriorityFeePerGas: 2_000_000_000n,
+      ts: now,
+    };
+  }
 }
 
 export interface AttestTxResult {
@@ -92,7 +137,7 @@ export interface AttestTxResult {
 
 /**
  * Signs locally and broadcasts via Monad's native `eth_sendRawTransactionSync` RPC for single-RTT
- * receipt confirmation; automatically falls back to standard `sendRawTransaction` + polling if needed.
+ * receipt confirmation; automatically falls back to standard `sendRawTransaction` + fast polling.
  */
 async function sendContractTxFast(params: {
   account: ReturnType<typeof privateKeyToAccount>;
@@ -100,7 +145,6 @@ async function sendContractTxFast(params: {
   data: `0x${string}`;
   value?: bigint;
   gas: bigint;
-  nonce: number;
 }) {
   const publicClient = getPublicClient();
   const walletClient = createWalletClient({
@@ -108,83 +152,96 @@ async function sendContractTxFast(params: {
     chain: monadTestnet,
     transport: http(MONAD_RPC_URL),
   });
+  const fees = await getCachedFees();
 
-  const fees = await publicClient.estimateFeesPerGas();
-  const serialized = await walletClient.signTransaction({
-    account: params.account,
-    chain: monadTestnet,
-    to: params.to,
-    data: params.data,
-    value: params.value ?? 0n,
-    gas: params.gas,
-    nonce: params.nonce,
-    maxFeePerGas: fees.maxFeePerGas ?? 150_000_000_000n,
-    maxPriorityFeePerGas: fees.maxPriorityFeePerGas ?? 2_000_000_000n,
-    type: "eip1559",
-  });
-
-  const sentAtMs = Date.now();
-  try {
-    // Monad native synchronous receipt RPC (single round-trip)
-    const rawReceipt = (await publicClient.request({
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      method: "eth_sendRawTransactionSync" as any,
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      params: [serialized] as any,
-    })) as {
-      transactionHash: `0x${string}`;
-      blockNumber: `0x${string}` | bigint;
-      gasUsed: `0x${string}` | bigint;
-      effectiveGasPrice: `0x${string}` | bigint;
-      status: `0x${string}` | "success" | "reverted";
-    };
-
-    const proposedAtMs = Date.now();
-    const blockNumber = BigInt(rawReceipt.blockNumber);
-    const gasUsed = BigInt(rawReceipt.gasUsed);
-    const effectiveGasPrice = BigInt(rawReceipt.effectiveGasPrice);
-    const statusOk = rawReceipt.status === "0x1" || rawReceipt.status === "success";
-
-    return {
-      txHash: rawReceipt.transactionHash,
-      sentAtMs,
-      proposedAtMs,
-      blockNumber,
-      gasLimit: params.gas,
-      gasUsed,
-      effectiveGasPrice,
-      txStatus: (statusOk ? "success" : "reverted") as "success" | "reverted",
-      syncRpcUsed: true,
-    };
-  } catch {
-    // Graceful fallback to standard async sendRawTransaction + fast polling
-    const txHash = await publicClient.sendRawTransaction({
-      serializedTransaction: serialized,
+  let lastErr: unknown;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const nonce = await allocateNonce(params.account.address);
+    const serialized = await walletClient.signTransaction({
+      account: params.account,
+      chain: monadTestnet,
+      to: params.to,
+      data: params.data,
+      value: params.value ?? 0n,
+      gas: params.gas,
+      nonce,
+      maxFeePerGas: fees.maxFeePerGas,
+      maxPriorityFeePerGas: fees.maxPriorityFeePerGas,
+      type: "eip1559",
     });
-    const receipt: TransactionReceipt = await publicClient.waitForTransactionReceipt({
-      hash: txHash,
-      pollingInterval: 250,
-      timeout: 20_000,
-    });
-    const proposedAtMs = Date.now();
-    return {
-      txHash,
-      sentAtMs,
-      proposedAtMs,
-      blockNumber: receipt.blockNumber,
-      gasLimit: params.gas,
-      gasUsed: receipt.gasUsed,
-      effectiveGasPrice: receipt.effectiveGasPrice,
-      txStatus: receipt.status,
-      syncRpcUsed: false,
-    };
+
+    const sentAtMs = Date.now();
+    try {
+      const rawReceipt = (await publicClient.request({
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        method: "eth_sendRawTransactionSync" as any,
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        params: [serialized] as any,
+      })) as {
+        transactionHash: `0x${string}`;
+        blockNumber: `0x${string}` | bigint;
+        gasUsed: `0x${string}` | bigint;
+        effectiveGasPrice: `0x${string}` | bigint;
+        status: `0x${string}` | "success" | "reverted";
+      };
+
+      const proposedAtMs = Date.now();
+      const statusOk = rawReceipt.status === "0x1" || rawReceipt.status === "success";
+      return {
+        txHash: rawReceipt.transactionHash,
+        sentAtMs,
+        proposedAtMs,
+        blockNumber: BigInt(rawReceipt.blockNumber),
+        gasLimit: params.gas,
+        gasUsed: BigInt(rawReceipt.gasUsed),
+        effectiveGasPrice: BigInt(rawReceipt.effectiveGasPrice),
+        txStatus: (statusOk ? "success" : "reverted") as "success" | "reverted",
+        syncRpcUsed: true,
+      };
+    } catch (syncErr) {
+      const syncMsg = syncErr instanceof Error ? syncErr.message : String(syncErr);
+      // If method unsupported / timeout, fall back to standard sendRawTransaction
+      if (
+        syncMsg.toLowerCase().includes("reserve balance") ||
+        syncMsg.toLowerCase().includes("nonce")
+      ) {
+        resetNonceCache(params.account.address);
+        lastErr = syncErr;
+        await new Promise((r) => setTimeout(r, 600));
+        continue;
+      }
+
+      try {
+        const txHash = await publicClient.sendRawTransaction({
+          serializedTransaction: serialized,
+        });
+        const receipt: TransactionReceipt = await publicClient.waitForTransactionReceipt({
+          hash: txHash,
+          pollingInterval: 250,
+          timeout: 20_000,
+        });
+        const proposedAtMs = Date.now();
+        return {
+          txHash,
+          sentAtMs,
+          proposedAtMs,
+          blockNumber: receipt.blockNumber,
+          gasLimit: params.gas,
+          gasUsed: receipt.gasUsed,
+          effectiveGasPrice: receipt.effectiveGasPrice,
+          txStatus: receipt.status,
+          syncRpcUsed: false,
+        };
+      } catch (fallbackErr) {
+        resetNonceCache(params.account.address);
+        lastErr = fallbackErr;
+        await new Promise((r) => setTimeout(r, 600));
+      }
+    }
   }
+  throw lastErr instanceof Error ? lastErr : new Error(String(lastErr));
 }
 
-/**
- * Signs an EIP-712 CheckAttestation and submits to Monad Testnet.
- * Uses tight explicit gas limits because Monad charges gas_limit * effectiveGasPrice.
- */
 export async function submitCheckOnchain(params: {
   taskId: `0x${string}`;
   checkIndex: number;
@@ -203,7 +260,6 @@ export async function submitCheckOnchain(params: {
   }
 
   const mode = params.mode || "direct";
-  const publicClient = getPublicClient();
   const walletClient = createWalletClient({
     account,
     chain: monadTestnet,
@@ -249,17 +305,15 @@ export async function submitCheckOnchain(params: {
           params.receiptHash,
         ] as const);
 
-  // Tight explicit gas limits tuned for Monad (charged by gas_limit, not gas_used)
-  const estimatedGas = await publicClient.estimateContractGas({
-    address: contractAddress,
-    abi: TASKRAIL_ABI,
-    account: account.address,
-    functionName,
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    args: args as any,
-  });
-  // Tight +6% buffer (Monad bills gas_limit directly)
-  const gasLimit = estimatedGas + (estimatedGas * 6n) / 100n + 2000n;
+  const gasLimit =
+    mode === "eip712"
+      ? params.passed
+        ? GAS_LIMITS.recordCheckSigPass
+        : GAS_LIMITS.recordCheckSigHalt
+      : params.passed
+        ? GAS_LIMITS.recordCheckDirectPass
+        : GAS_LIMITS.recordCheckDirectHalt;
+
   const data = encodeFunctionData({
     abi: TASKRAIL_ABI,
     functionName,
@@ -267,20 +321,17 @@ export async function submitCheckOnchain(params: {
     args: args as any,
   });
 
-  const nonce = await allocateNonce(account.address);
+  const sent = await sendContractTxFast({
+    account,
+    to: contractAddress,
+    data,
+    gas: gasLimit,
+  });
 
-  let sent;
-  try {
-    sent = await sendContractTxFast({
-      account,
-      to: contractAddress,
-      data,
-      gas: gasLimit,
-      nonce,
-    });
-  } catch (err) {
-    resetNonceCache();
-    throw err;
+  if (sent.txStatus !== "success") {
+    throw new Error(
+      `Onchain check #${params.checkIndex} reverted (tx=${sent.txHash}, gasLimit=${sent.gasLimit})`
+    );
   }
 
   const actualPaidWei = sent.gasLimit * sent.effectiveGasPrice;
@@ -303,10 +354,6 @@ export async function submitCheckOnchain(params: {
   };
 }
 
-/**
- * Guest / mobile 1-click task creation helper (Testnet only!) so judges on mobile without MetaMask
- * can still trigger real Monad Testnet escrow locking & refund transactions live.
- */
 export async function createDemoTaskOnchain(params: {
   label: string;
   totalChecks: number;
@@ -320,23 +367,14 @@ export async function createDemoTaskOnchain(params: {
     throw new Error("Server testnet demo keys not configured");
   }
   const contractAddress = getContractAddress();
-  const publicClient = getPublicClient();
-  const walletClient = createWalletClient({
-    account: employer,
-    chain: monadTestnet,
-    transport: http(MONAD_RPC_URL),
-  });
-
   const taskId = keccak256(toHex(`${params.label}-${Date.now()}-${Math.random()}`));
   const agent = getDefaultAgentAddress();
   const value = parseEther(params.rewardMon);
-  const deadline = BigInt(Math.floor(Date.now() / 1000) + 900); // 15 min
-  const challengeWindow = 120n; // 120s re-run dispute window
+  const deadline = BigInt(Math.floor(Date.now() / 1000) + 900);
+  const challengeWindow = 120n;
 
-  const estimatedGas = await publicClient.estimateContractGas({
-    address: contractAddress,
+  const data = encodeFunctionData({
     abi: TASKRAIL_ABI,
-    account: employer.address,
     functionName: "createTask",
     args: [
       taskId,
@@ -348,57 +386,32 @@ export async function createDemoTaskOnchain(params: {
       challengeWindow,
       params.runHash,
     ],
+  });
+
+  const sent = await sendContractTxFast({
+    account: employer,
+    to: contractAddress,
+    data,
     value,
+    gas: GAS_LIMITS.createTask,
   });
-  const gasLimit = estimatedGas + (estimatedGas * 6n) / 100n + 3000n;
-  const nonce = await allocateNonce(employer.address);
-
-  const sentAtMs = Date.now();
-  let txHash: `0x${string}`;
-  try {
-    txHash = await walletClient.writeContract({
-      address: contractAddress,
-      abi: TASKRAIL_ABI,
-      functionName: "createTask",
-      args: [
-        taskId,
-        agent,
-        verifier.address,
-        params.totalChecks,
-        params.finalBonusBps,
-        deadline,
-        challengeWindow,
-        params.runHash,
-      ],
-      value,
-      gas: gasLimit,
-      nonce,
-    });
-  } catch (err) {
-    resetNonceCache();
-    throw err;
+  if (sent.txStatus !== "success") {
+    throw new Error(`createTask reverted onchain (tx=${sent.txHash})`);
   }
-
-  const receipt = await publicClient.waitForTransactionReceipt({
-    hash: txHash,
-    pollingInterval: 250,
-  });
-  const tx = await publicClient.getTransaction({ hash: txHash });
-  const actualPaidMon = formatEther(tx.gas * receipt.effectiveGasPrice);
 
   return {
     taskId,
-    txHash,
+    txHash: sent.txHash,
     employer: employer.address,
     agent,
     verifier: verifier.address,
     rewardMon: params.rewardMon,
     deadline: deadline.toString(),
-    blockNumber: receipt.blockNumber.toString(),
-    latencyMs: Date.now() - sentAtMs,
-    gasLimit: tx.gas.toString(),
-    gasUsed: receipt.gasUsed.toString(),
-    actualPaidMon,
+    blockNumber: sent.blockNumber.toString(),
+    latencyMs: sent.proposedAtMs - sent.sentAtMs,
+    gasLimit: sent.gasLimit.toString(),
+    gasUsed: sent.gasUsed.toString(),
+    actualPaidMon: formatEther(sent.gasLimit * sent.effectiveGasPrice),
   };
 }
 
@@ -406,51 +419,30 @@ export async function refundDemoTaskOnchain(taskId: `0x${string}`) {
   const employer = getDemoEmployerAccount();
   if (!employer) throw new Error("Server demo employer key not configured");
   const contractAddress = getContractAddress();
-  const publicClient = getPublicClient();
-  const walletClient = createWalletClient({
-    account: employer,
-    chain: monadTestnet,
-    transport: http(MONAD_RPC_URL),
-  });
 
-  const estimatedGas = await publicClient.estimateContractGas({
-    address: contractAddress,
+  const data = encodeFunctionData({
     abi: TASKRAIL_ABI,
-    account: employer.address,
     functionName: "refundRemaining",
     args: [taskId],
   });
-  const gasLimit = estimatedGas + (estimatedGas * 6n) / 100n + 3000n;
-  const nonce = await allocateNonce(employer.address);
-  const sentAtMs = Date.now();
 
-  let txHash: `0x${string}`;
-  try {
-    txHash = await walletClient.writeContract({
-      address: contractAddress,
-      abi: TASKRAIL_ABI,
-      functionName: "refundRemaining",
-      args: [taskId],
-      gas: gasLimit,
-      nonce,
-    });
-  } catch (err) {
-    resetNonceCache();
-    throw err;
+  const sent = await sendContractTxFast({
+    account: employer,
+    to: contractAddress,
+    data,
+    gas: GAS_LIMITS.refundRemaining,
+  });
+  if (sent.txStatus !== "success") {
+    throw new Error(`refundRemaining reverted onchain (tx=${sent.txHash})`);
   }
 
-  const receipt = await publicClient.waitForTransactionReceipt({
-    hash: txHash,
-    pollingInterval: 250,
-  });
-  const tx = await publicClient.getTransaction({ hash: txHash });
   return {
-    txHash,
-    blockNumber: receipt.blockNumber.toString(),
-    latencyMs: Date.now() - sentAtMs,
-    gasLimit: tx.gas.toString(),
-    gasUsed: receipt.gasUsed.toString(),
-    actualPaidMon: formatEther(tx.gas * receipt.effectiveGasPrice),
+    txHash: sent.txHash,
+    blockNumber: sent.blockNumber.toString(),
+    latencyMs: sent.proposedAtMs - sent.sentAtMs,
+    gasLimit: sent.gasLimit.toString(),
+    gasUsed: sent.gasUsed.toString(),
+    actualPaidMon: formatEther(sent.gasLimit * sent.effectiveGasPrice),
   };
 }
 
@@ -463,51 +455,27 @@ export async function disputeDemoCheckOnchain(params: {
   const challenger = getDemoEmployerAccount();
   if (!challenger) throw new Error("Server demo challenger key not configured");
   const contractAddress = getContractAddress();
-  const publicClient = getPublicClient();
-  const walletClient = createWalletClient({
-    account: challenger,
-    chain: monadTestnet,
-    transport: http(MONAD_RPC_URL),
-  });
 
-  const estimatedGas = await publicClient.estimateContractGas({
-    address: contractAddress,
+  const data = encodeFunctionData({
     abi: TASKRAIL_ABI,
-    account: challenger.address,
     functionName: "disputeCheck",
     args: [params.taskId, params.checkIndex, params.counterReceiptHash, params.reason],
   });
-  const gasLimit = estimatedGas + (estimatedGas * 6n) / 100n + 3000n;
-  const nonce = await allocateNonce(challenger.address);
-  const sentAtMs = Date.now();
 
-  let txHash: `0x${string}`;
-  try {
-    txHash = await walletClient.writeContract({
-      address: contractAddress,
-      abi: TASKRAIL_ABI,
-      functionName: "disputeCheck",
-      args: [params.taskId, params.checkIndex, params.counterReceiptHash, params.reason],
-      gas: gasLimit,
-      nonce,
-    });
-  } catch (err) {
-    resetNonceCache();
-    throw err;
-  }
-
-  const receipt = await publicClient.waitForTransactionReceipt({
-    hash: txHash,
-    pollingInterval: 250,
+  const sent = await sendContractTxFast({
+    account: challenger,
+    to: contractAddress,
+    data,
+    gas: GAS_LIMITS.disputeCheck,
   });
-  const tx = await publicClient.getTransaction({ hash: txHash });
+
   return {
-    txHash,
+    txHash: sent.txHash,
     challenger: challenger.address,
-    blockNumber: receipt.blockNumber.toString(),
-    latencyMs: Date.now() - sentAtMs,
-    gasLimit: tx.gas.toString(),
-    gasUsed: receipt.gasUsed.toString(),
-    actualPaidMon: formatEther(tx.gas * receipt.effectiveGasPrice),
+    blockNumber: sent.blockNumber.toString(),
+    latencyMs: sent.proposedAtMs - sent.sentAtMs,
+    gasLimit: sent.gasLimit.toString(),
+    gasUsed: sent.gasUsed.toString(),
+    actualPaidMon: formatEther(sent.gasLimit * sent.effectiveGasPrice),
   };
 }
