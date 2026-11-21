@@ -1,10 +1,12 @@
 import {
   createWalletClient,
+  encodeFunctionData,
   formatEther,
   http,
   keccak256,
   parseEther,
   toHex,
+  type TransactionReceipt,
 } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import { monadTestnet } from "viem/chains";
@@ -74,6 +76,7 @@ export function resetNonceCache() {
 export interface AttestTxResult {
   txHash: `0x${string}`;
   mode: "direct" | "eip712";
+  syncRpcUsed: boolean;
   signature?: `0x${string}`;
   verifierAddress: `0x${string}`;
   sentAtMs: number;
@@ -85,6 +88,97 @@ export interface AttestTxResult {
   effectiveGasPrice: string;
   actualPaidMon: string; // Monad charges gas_limit * effectiveGasPrice
   txStatus: "success" | "reverted";
+}
+
+/**
+ * Signs locally and broadcasts via Monad's native `eth_sendRawTransactionSync` RPC for single-RTT
+ * receipt confirmation; automatically falls back to standard `sendRawTransaction` + polling if needed.
+ */
+async function sendContractTxFast(params: {
+  account: ReturnType<typeof privateKeyToAccount>;
+  to: `0x${string}`;
+  data: `0x${string}`;
+  value?: bigint;
+  gas: bigint;
+  nonce: number;
+}) {
+  const publicClient = getPublicClient();
+  const walletClient = createWalletClient({
+    account: params.account,
+    chain: monadTestnet,
+    transport: http(MONAD_RPC_URL),
+  });
+
+  const fees = await publicClient.estimateFeesPerGas();
+  const serialized = await walletClient.signTransaction({
+    account: params.account,
+    chain: monadTestnet,
+    to: params.to,
+    data: params.data,
+    value: params.value ?? 0n,
+    gas: params.gas,
+    nonce: params.nonce,
+    maxFeePerGas: fees.maxFeePerGas ?? 150_000_000_000n,
+    maxPriorityFeePerGas: fees.maxPriorityFeePerGas ?? 2_000_000_000n,
+    type: "eip1559",
+  });
+
+  const sentAtMs = Date.now();
+  try {
+    // Monad native synchronous receipt RPC (single round-trip)
+    const rawReceipt = (await publicClient.request({
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      method: "eth_sendRawTransactionSync" as any,
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      params: [serialized] as any,
+    })) as {
+      transactionHash: `0x${string}`;
+      blockNumber: `0x${string}` | bigint;
+      gasUsed: `0x${string}` | bigint;
+      effectiveGasPrice: `0x${string}` | bigint;
+      status: `0x${string}` | "success" | "reverted";
+    };
+
+    const proposedAtMs = Date.now();
+    const blockNumber = BigInt(rawReceipt.blockNumber);
+    const gasUsed = BigInt(rawReceipt.gasUsed);
+    const effectiveGasPrice = BigInt(rawReceipt.effectiveGasPrice);
+    const statusOk = rawReceipt.status === "0x1" || rawReceipt.status === "success";
+
+    return {
+      txHash: rawReceipt.transactionHash,
+      sentAtMs,
+      proposedAtMs,
+      blockNumber,
+      gasLimit: params.gas,
+      gasUsed,
+      effectiveGasPrice,
+      txStatus: (statusOk ? "success" : "reverted") as "success" | "reverted",
+      syncRpcUsed: true,
+    };
+  } catch {
+    // Graceful fallback to standard async sendRawTransaction + fast polling
+    const txHash = await publicClient.sendRawTransaction({
+      serializedTransaction: serialized,
+    });
+    const receipt: TransactionReceipt = await publicClient.waitForTransactionReceipt({
+      hash: txHash,
+      pollingInterval: 250,
+      timeout: 20_000,
+    });
+    const proposedAtMs = Date.now();
+    return {
+      txHash,
+      sentAtMs,
+      proposedAtMs,
+      blockNumber: receipt.blockNumber,
+      gasLimit: params.gas,
+      gasUsed: receipt.gasUsed,
+      effectiveGasPrice: receipt.effectiveGasPrice,
+      txStatus: receipt.status,
+      syncRpcUsed: false,
+    };
+  }
 }
 
 /**
@@ -136,59 +230,51 @@ export async function submitCheckOnchain(params: {
     },
   });
 
+  const functionName = mode === "eip712" ? "recordCheckWithSig" : "recordCheckDirect";
+  const args =
+    mode === "eip712"
+      ? ([
+          params.taskId,
+          params.checkIndex,
+          params.passed,
+          params.runHash,
+          params.receiptHash,
+          signature,
+        ] as const)
+      : ([
+          params.taskId,
+          params.checkIndex,
+          params.passed,
+          params.runHash,
+          params.receiptHash,
+        ] as const);
+
   // Tight explicit gas limits tuned for Monad (charged by gas_limit, not gas_used)
   const estimatedGas = await publicClient.estimateContractGas({
     address: contractAddress,
     abi: TASKRAIL_ABI,
     account: account.address,
-    functionName: mode === "eip712" ? "recordCheckWithSig" : "recordCheckDirect",
-    args:
-      mode === "eip712"
-        ? [
-            params.taskId,
-            params.checkIndex,
-            params.passed,
-            params.runHash,
-            params.receiptHash,
-            signature,
-          ]
-        : [
-            params.taskId,
-            params.checkIndex,
-            params.passed,
-            params.runHash,
-            params.receiptHash,
-          ],
+    functionName,
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    args: args as any,
   });
   // Tight +6% buffer (Monad bills gas_limit directly)
   const gasLimit = estimatedGas + (estimatedGas * 6n) / 100n + 2000n;
+  const data = encodeFunctionData({
+    abi: TASKRAIL_ABI,
+    functionName,
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    args: args as any,
+  });
 
   const nonce = await allocateNonce(account.address);
-  const sentAtMs = Date.now();
 
-  let txHash: `0x${string}`;
+  let sent;
   try {
-    txHash = await walletClient.writeContract({
-      address: contractAddress,
-      abi: TASKRAIL_ABI,
-      functionName: mode === "eip712" ? "recordCheckWithSig" : "recordCheckDirect",
-      args:
-        mode === "eip712"
-          ? [
-              params.taskId,
-              params.checkIndex,
-              params.passed,
-              params.runHash,
-              params.receiptHash,
-              signature,
-            ]
-          : [
-              params.taskId,
-              params.checkIndex,
-              params.passed,
-              params.runHash,
-              params.receiptHash,
-            ],
+    sent = await sendContractTxFast({
+      account,
+      to: contractAddress,
+      data,
       gas: gasLimit,
       nonce,
     });
@@ -197,29 +283,23 @@ export async function submitCheckOnchain(params: {
     throw err;
   }
 
-  const receipt = await publicClient.waitForTransactionReceipt({
-    hash: txHash,
-    pollingInterval: 250,
-    timeout: 20_000,
-  });
-  const proposedAtMs = Date.now();
-  const tx = await publicClient.getTransaction({ hash: txHash });
-  const actualPaidWei = tx.gas * receipt.effectiveGasPrice;
+  const actualPaidWei = sent.gasLimit * sent.effectiveGasPrice;
 
   return {
-    txHash,
+    txHash: sent.txHash,
     mode,
+    syncRpcUsed: sent.syncRpcUsed,
     signature,
     verifierAddress: account.address,
-    sentAtMs,
-    proposedAtMs,
-    proposedLatencyMs: proposedAtMs - sentAtMs,
-    blockNumber: receipt.blockNumber.toString(),
-    gasLimit: tx.gas.toString(),
-    gasUsed: receipt.gasUsed.toString(),
-    effectiveGasPrice: receipt.effectiveGasPrice.toString(),
+    sentAtMs: sent.sentAtMs,
+    proposedAtMs: sent.proposedAtMs,
+    proposedLatencyMs: sent.proposedAtMs - sent.sentAtMs,
+    blockNumber: sent.blockNumber.toString(),
+    gasLimit: sent.gasLimit.toString(),
+    gasUsed: sent.gasUsed.toString(),
+    effectiveGasPrice: sent.effectiveGasPrice.toString(),
     actualPaidMon: formatEther(actualPaidWei),
-    txStatus: receipt.status,
+    txStatus: sent.txStatus,
   };
 }
 

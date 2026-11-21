@@ -32,3 +32,4 @@ web/.vercel/
 .DS_Store
 Thumbs.db
 *.log
+*.tsbuildinfo

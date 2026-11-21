@@ -19,10 +19,13 @@ export function getPublicClient() {
   });
 }
 
+export const DEFAULT_DEPLOYED_CONTRACT =
+  "0x726f083ae7a6f9a1c2422dcd87c794fe8c88c938" as const;
+
 export function getContractAddress(): `0x${string}` {
   const addr = process.env.NEXT_PUBLIC_CONTRACT_ADDRESS;
-  if (!addr || !addr.startsWith("0x") || addr.length !== 42) {
-    return "0x0000000000000000000000000000000000000000";
+  if (!addr || !addr.startsWith("0x") || addr.length !== 42 || /^0x0+$/.test(addr)) {
+    return DEFAULT_DEPLOYED_CONTRACT;
   }
   return addr as `0x${string}`;
 }

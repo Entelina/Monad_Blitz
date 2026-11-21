@@ -3,6 +3,15 @@
 > **Per-Test-Case Live Code Verification & Atomic Micro-Escrow on Monad Testnet**  
 > Built from scratch at **Monad Blitz@广州** (`eventId=18`).
 
+## 已部署合约与真实链上记录（Monad Testnet · Chain ID `10143`）
+
+- **核心合约 `TaskRailEscrow`**：[`0x726f083ae7a6f9a1c2422dcd87c794fe8c88c938`](https://testnet.monadscan.com/address/0x726f083ae7a6f9a1c2422dcd87c794fe8c88c938)
+- **部署交易**：[`0x78a575a65a3eb64a42e73b0e207134e00c724985d7f20d4a06938d413778afca`](https://testnet.monadscan.com/tx/0x78a575a65a3eb64a42e73b0e207134e00c724985d7f20d4a06938d413778afca)（Block `#81483116`）
+- **实测冒烟交易**：
+  - `createTask`：[`0x85a4190c8bbbb72e30d626d55f3e0f9b1917f74ca0dfda554d869d15d70fd364`](https://testnet.monadscan.com/tx/0x85a4190c8bbbb72e30d626d55f3e0f9b1917f74ca0dfda554d869d15d70fd364)（实付 `0.02244 MON`）
+  - `recordCheckDirect (PASS)`：[`0xba16e496f020a35e2052dfc7542684660102074784fc5e6f6ba74371ec38dc6c`](https://testnet.monadscan.com/tx/0xba16e496f020a35e2052dfc7542684660102074784fc5e6f6ba74371ec38dc6c)（实付 `0.01632 MON`）
+  - `recordCheckDirect (HALT)`：[`0xb2d43fd0255c22171831873f602994ffa051d0e50b5f94680dc39473dc9acc32`](https://testnet.monadscan.com/tx/0xb2d43fd0255c22171831873f602994ffa051d0e50b5f94680dc39473dc9acc32)（实付 `0.01428 MON`）
+
 ## 一句话说明
 
 雇主在 Monad 测试网锁仓一笔 AI 代码任务赏金，AI Agent 提交代码 PR 后，隔离验证执行器逐条运行真实构建与 15 条细粒度单元测试——**每通过 1 条测试，600ms 级别就在 Monad 上链存证并原子释放对应微额赏金；一旦某条安全或权限单测失败，合约当场 `HALTED` 熔断，剩余大头资金可由雇主一键退回。** 任何第三方均可脱离后端直连 Monad RPC 独立核验凭证，并可在挑战窗口内用相同 `runHash` 独立复跑推翻异常验证者签名。

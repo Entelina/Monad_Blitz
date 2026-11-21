@@ -126,7 +126,7 @@ export default function HomePage() {
   const [status, setStatus] = useState<StatusPayload | null>(null);
   const [patchId, setPatchId] = useState<PatchId>("patch-fail");
   const [submitMode, setSubmitMode] = useState<"direct" | "eip712">("direct");
-  const [rewardMon, setRewardMon] = useState<string>("0.8");
+  const [rewardMon, setRewardMon] = useState<string>("1.6");
   const [useDemoWallet, setUseDemoWallet] = useState<boolean>(true);
   const [simulateDishonest, setSimulateDishonest] = useState<boolean>(false);
 

@@ -1,5 +1,7 @@
 import fs from "fs";
+import os from "os";
 import path from "path";
+import { execFileSync } from "child_process";
 import "dotenv/config";
 
 async function main() {
@@ -20,7 +22,7 @@ async function main() {
     .sort((a, b) => b.mtime - a.mtime);
 
   if (buildFiles.length === 0) {
-    throw new Error("No Hardhat build-info found. Run pnpm compile first.");
+    throw new Error("No Hardhat build-info found. Run hardhat compile first.");
   }
 
   const buildInfo = JSON.parse(
@@ -42,19 +44,36 @@ async function main() {
     foundryMetadata: JSON.parse(contractOutput.metadata),
   };
 
+  const tmpFile = path.join(os.tmpdir(), `taskrail-verify-${Date.now()}.json`);
+  fs.writeFileSync(tmpFile, JSON.stringify(payload), "utf8");
+
   console.log("Verifying on Monadscan / MonadVision / Socialscan via devnads verify API...");
-  console.log("  Address:", deployment.address);
+  console.log("  Address :", deployment.address);
   console.log("  Compiler:", compilerVersion);
 
-  const res = await fetch("https://agents.devnads.com/v1/verify", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
-  });
-
-  const text = await res.text();
-  console.log("HTTP", res.status);
-  console.log(text);
+  try {
+    const out = execFileSync(
+      "curl.exe",
+      [
+        "-sS",
+        "--max-time",
+        "60",
+        "-w",
+        "\nHTTP_CODE=%{http_code}",
+        "-X",
+        "POST",
+        "https://agents.devnads.com/v1/verify",
+        "-H",
+        "Content-Type: application/json",
+        "--data-binary",
+        `@${tmpFile}`,
+      ],
+      { encoding: "utf8" }
+    );
+    console.log(out);
+  } finally {
+    fs.rmSync(tmpFile, { force: true });
+  }
 }
 
 main().catch((err) => {
