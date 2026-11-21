@@ -2,14 +2,14 @@ import type { Metadata, Viewport } from "next";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "TaskRail Stream | Live Per-Test Verification & Micro-Escrow on Monad",
+  title: "TaskRail Stream | Machine-Executed Per-Test Verification & Micro-Escrow on Monad",
   description:
-    "Streaming per-test-case code verification, atomic micro-payouts, instant circuit breaker refunds, and same-runHash dispute checks on Monad Testnet.",
+    "Not manual approval, not LLM scoring. Live isolated sandbox runs 16 real tests per commit: each passing test streams micro-payout on Monad Testnet; any failure halts escrow instantly with 284ms refund.",
 };
 
 export const viewport: Viewport = {
   colorScheme: "dark",
-  themeColor: "#0b0b12",
+  themeColor: "#05080f",
 };
 
 export default function RootLayout({
@@ -22,7 +22,7 @@ export default function RootLayout({
       <head>
         <meta name="color-scheme" content="dark" />
       </head>
-      <body className="antialiased selection:bg-violet-500/30 selection:text-violet-100">
+      <body className="antialiased selection:bg-cyan-400/25 selection:text-cyan-100">
         {children}
       </body>
     </html>

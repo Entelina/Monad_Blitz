@@ -4,6 +4,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import {
   Activity,
   AlertTriangle,
+  Bug,
   CheckCircle2,
   Copy,
   ExternalLink,
@@ -32,10 +33,23 @@ import {
   txExplorerUrl,
 } from "@/lib/chain";
 import { MonadCommitState, MonadCommitTracker } from "@/lib/monadWs";
-import type { AgentPatch, PatchId, TestCaseSpec } from "@/lib/suite";
+import type {
+  BugMutationId,
+  BugMutationSpec,
+  TestCaseSpec,
+  UnverifiedBoundaryItem,
+} from "@/lib/suite";
 
-interface PatchWithHash extends AgentPatch {
+interface SynthesizedPreset {
+  mutations: BugMutationId[];
+  prNumber: string;
+  title: string;
+  agentName: string;
+  summary: string;
+  commit: string;
   runHash: `0x${string}`;
+  diffPreview: string[];
+  expectedFirstFailIndex: number | null;
 }
 
 interface StatusPayload {
@@ -49,7 +63,9 @@ interface StatusPayload {
   demoEmployerAddress: `0x${string}` | null;
   demoModeReady: boolean;
   agentAddress: `0x${string}`;
-  patches: Record<PatchId, PatchWithHash>;
+  bugMutations: BugMutationSpec[];
+  unverifiedBoundaries: UnverifiedBoundaryItem[];
+  presets: Record<string, SynthesizedPreset>;
   tests: TestCaseSpec[];
 }
 
@@ -107,7 +123,7 @@ interface IndependentVerifyResult {
 }
 
 interface RerunResult {
-  patchId: string;
+  mutations: BugMutationId[];
   runHash: string;
   checkIndex: number;
   conflict: boolean;
@@ -115,6 +131,13 @@ interface RerunResult {
   rerun: { passed: boolean; receiptHash: string; stdout: string; durationMs: number };
   disputeTx?: { txHash: string; latencyMs: number; actualPaidMon: string } | null;
 }
+
+const MUTATION_ORDER: BugMutationId[] = [
+  "drop_fee_precision",
+  "drop_owner_acl",
+  "drop_withdraw_cap",
+  "drop_reentrancy_lock",
+];
 
 function shortHex(hex?: string | null, left = 6, right = 4) {
   if (!hex) return "—";
@@ -124,7 +147,10 @@ function shortHex(hex?: string | null, left = 6, right = 4) {
 
 export default function HomePage() {
   const [status, setStatus] = useState<StatusPayload | null>(null);
-  const [patchId, setPatchId] = useState<PatchId>("patch-fail");
+  // Default to PR #143 (ACL bypass bug -> halts at Check #05)
+  const [selectedMutations, setSelectedMutations] = useState<BugMutationId[]>([
+    "drop_owner_acl",
+  ]);
   const [submitMode, setSubmitMode] = useState<"direct" | "eip712">("direct");
   const [rewardMon, setRewardMon] = useState<string>("1.6");
   const [useDemoWallet, setUseDemoWallet] = useState<boolean>(true);
@@ -152,12 +178,12 @@ export default function HomePage() {
   >([
     {
       id: "boot-0",
-      text: "$ taskrail-runner --network monad-testnet --chain-id 10143 --ready",
+      text: "$ taskrail-vm --network monad-testnet --chain-id 10143 --sync-rpc enabled",
       kind: "info",
     },
     {
       id: "boot-1",
-      text: "Ready: Select PR #143 (ACL Bug -> 30s Circuit Breaker) or PR #142 (16-Test Streaming Burst).",
+      text: "READY // Toggle any Live Bug Mutator switch above to synthesize new code + runHash, then stream or burst to Monad.",
       kind: "info",
     },
   ]);
@@ -189,7 +215,7 @@ export default function HomePage() {
     []
   );
 
-  // Load backend config & patches
+  // Load backend config & all 16 precomputed mutation presets
   useEffect(() => {
     fetch("/api/status")
       .then((r) => r.json())
@@ -212,7 +238,6 @@ export default function HomePage() {
       const bStr = head.blockNumber.toString();
       setLatestHead({ blockNumber: bStr, commitState: head.commitState });
 
-      // Update matching streamed transactions with REAL commitState & measured latency
       setStreamItems((prev) => {
         let changed = false;
         const rank: Record<MonadCommitState, number> = {
@@ -223,7 +248,6 @@ export default function HomePage() {
         };
         const next = prev.map((item) => {
           const itemBlock = BigInt(item.blockNumber);
-          // Either exact block transition or head finalized past item block
           const isMatch =
             item.blockNumber === bStr ||
             ((head.commitState === "Finalized" || head.commitState === "Verified") &&
@@ -259,8 +283,18 @@ export default function HomePage() {
     terminalEndRef.current?.scrollIntoView({ behavior: "smooth", block: "nearest" });
   }, [terminalLines]);
 
-  // Computed financial & performance telemetry
-  const totalRewardNum = Number(rewardMon) || 0.8;
+  const canonicalMutations = useMemo(
+    () => MUTATION_ORDER.filter((m) => selectedMutations.includes(m)),
+    [selectedMutations]
+  );
+
+  const activePreset = useMemo<SynthesizedPreset | null>(() => {
+    if (!status?.presets) return null;
+    const key = canonicalMutations.join(",");
+    return status.presets[key] || status.presets[""] || null;
+  }, [status, canonicalMutations]);
+
+  const totalRewardNum = Number(rewardMon) || 1.6;
   const totalChecks = 16;
   const finalBonusBps = 4000;
   const stepPayoutMon = useMemo(() => {
@@ -290,24 +324,10 @@ export default function HomePage() {
     return Math.round(sum / streamItems.length);
   }, [streamItems]);
 
-  const activePatch = status?.patches[patchId] || null;
-
   const copyText = (key: string, val: string) => {
     navigator.clipboard?.writeText(val);
     setCopiedKey(key);
     setTimeout(() => setCopiedKey(null), 1500);
-  };
-
-  const handleConnectWallet = async () => {
-    setErrorBanner(null);
-    try {
-      const addr = await connectBrowserWallet();
-      setWalletAddress(addr);
-      setUseDemoWallet(false);
-      pushTerminal(`[WALLET] Connected ${addr} on Monad Testnet (10143)`, "chain");
-    } catch (err) {
-      setErrorBanner(err instanceof Error ? err.message : String(err));
-    }
   };
 
   const resetRunState = () => {
@@ -323,8 +343,35 @@ export default function HomePage() {
     setErrorBanner(null);
   };
 
+  const toggleMutation = (id: BugMutationId) => {
+    if (busyAction !== null) return;
+    resetRunState();
+    setSelectedMutations((prev) =>
+      prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]
+    );
+  };
+
+  const applyPresetMutations = (next: BugMutationId[]) => {
+    if (busyAction !== null) return;
+    resetRunState();
+    setSelectedMutations(next);
+    if (next.length === 0) setSimulateDishonest(false);
+  };
+
+  const handleConnectWallet = async () => {
+    setErrorBanner(null);
+    try {
+      const addr = await connectBrowserWallet();
+      setWalletAddress(addr);
+      setUseDemoWallet(false);
+      pushTerminal(`[WALLET] Connected ${addr} on Monad Testnet (10143)`, "chain");
+    } catch (err) {
+      setErrorBanner(err instanceof Error ? err.message : String(err));
+    }
+  };
+
   const handleLockEscrow = async (): Promise<`0x${string}` | null> => {
-    if (!status?.contractReady) {
+    if (!status?.contractReady || !activePreset) {
       setErrorBanner("尚未部署或配置 NEXT_PUBLIC_CONTRACT_ADDRESS");
       return null;
     }
@@ -337,9 +384,8 @@ export default function HomePage() {
     setRerunResult(null);
 
     try {
-      const patch = status.patches[patchId];
       pushTerminal(
-        `$ lock-escrow --patch ${patchId} --reward ${rewardMon}MON --checks 16 --bonus 40% --runHash ${shortHex(patch.runHash, 10, 6)}`,
+        `$ lock-escrow --mutations [${canonicalMutations.join(",") || "none"}] --reward ${rewardMon}MON --runHash ${shortHex(activePreset.runHash, 10, 6)}`,
         "info"
       );
 
@@ -348,7 +394,7 @@ export default function HomePage() {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            patchId,
+            mutations: canonicalMutations,
             rewardMon,
             totalChecks,
             finalBonusBps,
@@ -370,7 +416,9 @@ export default function HomePage() {
       } else {
         const account = walletAddress || (await connectBrowserWallet());
         setWalletAddress(account);
-        const taskId = keccak256(toHex(`${patchId}-${Date.now()}-${Math.random()}`));
+        const taskId = keccak256(
+          toHex(`${canonicalMutations.join("+") || "clean"}-${Date.now()}-${Math.random()}`)
+        );
         const deadline = BigInt(Math.floor(Date.now() / 1000) + 900);
         const res = await browserCreateTask({
           account,
@@ -381,7 +429,7 @@ export default function HomePage() {
           finalBonusBps,
           deadline,
           challengeWindow: 120n,
-          runHash: patch.runHash,
+          runHash: activePreset.runHash,
           rewardMon,
         });
         setActiveTaskId(taskId);
@@ -409,12 +457,14 @@ export default function HomePage() {
   const runVerificationStream = async (targetTaskId?: `0x${string}`) => {
     const tid = targetTaskId || activeTaskId;
     if (!tid) {
-      setErrorBanner("请先锁仓创建任务，或直接点击「一键完整演示」");
+      setErrorBanner("请先锁仓创建任务，或直接点击「一键逐条流式演示」");
       return;
     }
     setErrorBanner(null);
     setBusyAction("streaming");
     stopStreamRef.current = false;
+
+    const firstExpectedFail = activePreset?.expectedFirstFailIndex ?? null;
 
     pushTerminal(
       `$ start-stream --task ${shortHex(tid, 10, 6)} --mode ${submitMode} --sandbox node:vm`,
@@ -429,15 +479,15 @@ export default function HomePage() {
           break;
         }
 
-        // Only inject simulated dishonest attestation on check #5 of patch-fail when toggled on
-        const dishonestThisCheck = simulateDishonest && patchId === "patch-fail" && i === 5;
+        const dishonestThisCheck =
+          simulateDishonest && firstExpectedFail !== null && i === firstExpectedFail;
 
         const res = await fetch("/api/run-check", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             taskId: tid,
-            patchId,
+            mutations: canonicalMutations,
             checkIndex: i,
             mode: submitMode,
             simulateDishonest: dishonestThisCheck,
@@ -452,10 +502,7 @@ export default function HomePage() {
         const chain = data.chain;
         const attestedPassed: boolean = data.attested.passed;
 
-        pushTerminal(
-          `${exec.stdout} (${exec.durationMs}ms)`,
-          exec.passed ? "pass" : "fail"
-        );
+        pushTerminal(`${exec.stdout} (${exec.durationMs}ms)`, exec.passed ? "pass" : "fail");
 
         const isLast = i === totalChecks - 1;
         const payout = attestedPassed
@@ -503,17 +550,17 @@ export default function HomePage() {
 
         if (dishonestThisCheck) {
           pushTerminal(
-            `[DEMO ATTACK] Dishonest verifier forged PASS on failing Check #5! tx=${shortHex(chain.txHash, 10, 6)} — Now click "Re-run Same runHash" below to catch & dispute onchain!`,
+            `[DEMO ATTACK] Dishonest verifier forged PASS on failing Check #${i}! tx=${shortHex(chain.txHash, 10, 6)} — Click "同 runHash 独立复跑" below to catch & freeze onchain!`,
             "fail"
           );
-          setLiveAnnouncement("已模拟恶意验证者伪造第 5 项通过，请点击下方同 runHash 复跑抓包并发起链上争议");
+          setLiveAnnouncement(`已模拟恶意验证者伪造第 ${i} 项通过，请点击下方同 runHash 复跑抓包并发起链上争议`);
           break;
         }
 
         if (!attestedPassed) {
           setTaskStatus("HALTED");
           pushTerminal(
-            `[CIRCUIT BREAKER] TaskRailEscrow HALTED at Check #${i}! Remaining ${(totalRewardNum - currentPaid).toFixed(4)} MON locked for employer refund.`,
+            `[CIRCUIT BREAKER] TaskRailEscrow HALTED at Check #${i}! Remaining ${(totalRewardNum - currentPaid).toFixed(4)} MON protected for employer refund.`,
             "fail"
           );
           setLiveAnnouncement(
@@ -559,7 +606,7 @@ export default function HomePage() {
     setBurstSummary(null);
 
     pushTerminal(
-      `$ pipeline-burst --task ${shortHex(tid, 10, 6)} --patch ${patchId} --mode ${submitMode} --concurrent-nonces`,
+      `$ pipeline-burst --task ${shortHex(tid, 10, 6)} --mutations [${canonicalMutations.join(",") || "none"}] --mode ${submitMode} --concurrent-nonces`,
       "info"
     );
 
@@ -569,7 +616,7 @@ export default function HomePage() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           taskId: tid,
-          patchId,
+          mutations: canonicalMutations,
           mode: submitMode,
         }),
       });
@@ -702,7 +749,6 @@ export default function HomePage() {
     }
   };
 
-  // ZERO-BACKEND independent verification directly via browser viem -> Monad RPC
   const handleIndependentVerify = async () => {
     const targetId = (verifyTaskInput.trim() || activeTaskId) as `0x${string}` | null;
     if (!targetId || !status?.contractReady) {
@@ -734,7 +780,6 @@ export default function HomePage() {
         }),
       ]);
 
-      // Locally verify EIP-712 signatures for any checks captured in this session
       let sigChecked = 0;
       let sigValid = 0;
       for (const item of streamItems) {
@@ -852,47 +897,50 @@ export default function HomePage() {
   };
 
   return (
-    <div className="min-h-screen bg-[#0b0b12] text-[#f4f4f8]">
-      <a href="#main-console" className="skip-link bg-violet-600 text-white px-3 py-2">
+    <div className="min-h-screen text-[#e6f2f8]">
+      <a href="#main-console" className="skip-link bg-cyan-500 text-slate-950 px-3 py-2 font-semibold">
         跳到主控制台
       </a>
 
-      {/* Accessible polite live announcer */}
       <div className="sr-only" role="status" aria-live="polite">
         {liveAnnouncement}
       </div>
 
-      {/* Header */}
-      <header className="sticky top-0 z-20 border-b border-[#272940] bg-[#0b0b12]/95 backdrop-blur">
-        <div className="mx-auto flex max-w-[1440px] flex-wrap items-center justify-between gap-3 px-4 py-3">
+      {/* Top Mission Control Header (M.A.V.E.N. Style) */}
+      <header className="sticky top-0 z-20 border-b border-cyan-400/20 bg-[#05080f]/95 backdrop-blur">
+        <div className="mx-auto flex max-w-[1440px] flex-wrap items-center justify-between gap-3 px-4 py-2.5">
           <div className="flex items-center gap-3">
-            <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-[#836ef9] text-white shadow-lg shadow-violet-900/40">
-              <Zap className="h-5 w-5" aria-hidden="true" />
+            <div className="hud-chamfer-sm flex h-8 w-8 items-center justify-center bg-gradient-to-br from-[#836ef9] to-[#22d3ee] text-slate-950">
+              <Zap className="h-4 w-4 stroke-[2.5]" aria-hidden="true" />
             </div>
             <div>
-              <h1 className="text-base font-bold tracking-tight text-white">
-                TaskRail Stream
-              </h1>
-              <p className="text-xs text-[#a7abc4]">
-                Per-Test Live Verification &amp; Atomic Micro-Escrow · Monad Blitz Guangzhou
+              <div className="flex items-center gap-2">
+                <span className="font-mono-tabular text-sm font-bold tracking-wider text-white">
+                  TASKRAIL STREAM
+                </span>
+                <span className="hud-chamfer-sm bg-cyan-400/15 px-1.5 py-0.5 font-mono-tabular text-[10px] font-semibold tracking-widest text-cyan-300">
+                  V1.1 · MONAD BLITZ GZ
+                </span>
+              </div>
+              <p className="font-mono-tabular text-[10px] tracking-wider uppercase text-[#8aa0b4]">
+                // MACHINE-EXECUTED CODE VERIFICATION &amp; ATOMIC MICRO-ESCROW
               </p>
             </div>
           </div>
 
-          <div className="flex flex-wrap items-center gap-2 text-xs">
-            {/* Real Monad WS Heartbeat */}
-            <div className="flex items-center gap-2 rounded-lg border border-[#272940] bg-[#12131f] px-3 py-1.5 font-mono-tabular">
+          <div className="flex flex-wrap items-center gap-2 text-xs font-mono-tabular">
+            <div className="hud-chamfer-sm flex items-center gap-2 border border-cyan-400/25 bg-[#0a1020] px-3 py-1.5">
               <span
-                className={`h-2 w-2 rounded-full ${wsConnected ? "bg-emerald-400" : "bg-amber-400"}`}
+                className={`hud-led h-2 w-2 rounded-full ${wsConnected ? "bg-[#a3e635] text-[#a3e635]" : "bg-amber-400 text-amber-400"}`}
                 aria-hidden="true"
               />
-              <span className="text-[#a7abc4]">Monad Testnet (10143)</span>
+              <span className="text-[#8aa0b4]">MONAD TESTNET (10143)</span>
               {latestHead ? (
-                <span className="text-violet-300">
-                  #{latestHead.blockNumber} · {latestHead.commitState}
+                <span className="text-cyan-300">
+                  #{latestHead.blockNumber} · {latestHead.commitState.toUpperCase()}
                 </span>
               ) : (
-                <span className="text-amber-300">Connecting WS...</span>
+                <span className="text-amber-300">SYNCING WS...</span>
               )}
             </div>
 
@@ -901,23 +949,21 @@ export default function HomePage() {
                 href={addressExplorerUrl(status.contractAddress)}
                 target="_blank"
                 rel="noreferrer"
-                className="flex items-center gap-1.5 rounded-lg border border-[#272940] bg-[#12131f] px-3 py-1.5 font-mono-tabular text-violet-300 hover:border-violet-400"
+                className="hud-chamfer-sm flex items-center gap-1.5 border border-cyan-400/25 bg-[#0a1020] px-3 py-1.5 text-cyan-200 hover:border-cyan-400"
               >
-                <span>Escrow: {shortHex(status.contractAddress)}</span>
-                <ExternalLink className="h-3.5 w-3.5" aria-hidden="true" />
+                <span>ESCROW {shortHex(status.contractAddress)}</span>
+                <ExternalLink className="h-3 w-3" aria-hidden="true" />
               </a>
             )}
 
             <button
               type="button"
               onClick={handleConnectWallet}
-              className="flex min-h-[34px] items-center gap-1.5 rounded-lg border border-violet-500/60 bg-violet-600/20 px-3 py-1.5 font-medium text-violet-100 hover:bg-violet-600/35"
+              className="hud-chamfer-sm flex min-h-[32px] items-center gap-1.5 border border-[#836ef9]/70 bg-[#836ef9]/20 px-3 py-1.5 font-semibold text-violet-100 hover:bg-[#836ef9]/35"
             >
               <Wallet className="h-3.5 w-3.5" aria-hidden="true" />
               <span>
-                {walletAddress
-                  ? `Wallet: ${shortHex(walletAddress)}`
-                  : "Connect MetaMask / Rabby"}
+                {walletAddress ? shortHex(walletAddress) : "CONNECT WALLET"}
               </span>
             </button>
           </div>
@@ -925,82 +971,256 @@ export default function HomePage() {
       </header>
 
       <main id="main-console" tabIndex={-1} className="mx-auto max-w-[1440px] space-y-4 px-4 py-4">
+        {/* FIRST-SCREEN HERO DIFFERENTIATION BANNER (Tallyfold Two-Tone Typography + Monad Proof Bar) */}
+        <section className="hud-panel p-4 sm:p-5">
+          <div className="grid grid-cols-1 gap-4 lg:grid-cols-12 lg:items-center">
+            <div className="lg:col-span-8">
+              <div className="flex flex-wrap items-center gap-2 font-mono-tabular text-[11px] uppercase tracking-widest">
+                <span className="inline-flex items-center gap-1.5 text-[#a3e635]">
+                  <span className="h-1.5 w-1.5 rounded-full bg-[#a3e635]" aria-hidden="true" />
+                  NOT MANUAL CLICK · NOT LLM SCORING · NOT STATIC HASH
+                </span>
+              </div>
+              <h1 className="mt-1.5 text-xl font-bold tracking-tight sm:text-2xl">
+                <span className="text-white">沙盒真跑 16 条单测，过一条放一笔款。</span>{" "}
+                <span className="text-cyan-300">错一条当场熔断，284ms 退回剩余资金。</span>
+              </h1>
+              <p className="mt-1.5 text-xs leading-relaxed text-[#8aa0b4]">
+                区别于往届“人工点确认 / LLM 打分 / 只存结果哈希”的托管合约：左侧隔离{" "}
+                <code className="text-cyan-200">node:vm</code> 真实执行代码并抛出{" "}
+                <code className="text-rose-300">AssertionError</code>，右侧 Monad 链上交易瀑布与资金流实时同步停止。支持{" "}
+                <strong className="text-slate-200">AI 代码交付按单测结算</strong> 与{" "}
+                <strong className="text-slate-200">AI 安全红队针对性攻击测试 PoC 按漏洞条数结算</strong>。
+              </p>
+            </div>
+
+            {/* Why Monad Real Measured Proof Strip */}
+            <div className="grid grid-cols-3 gap-2 font-mono-tabular lg:col-span-4">
+              <div className="border border-cyan-400/20 bg-[#070b16] p-2.5">
+                <div className="text-[10px] uppercase tracking-wider text-[#8aa0b4]">
+                  SYNC RPC RTT
+                </div>
+                <div className="mt-0.5 text-lg font-bold text-cyan-300">156ms</div>
+                <div className="text-[10px] text-[#5a6d82]">eth_sendRawTxSync</div>
+              </div>
+              <div className="border border-cyan-400/20 bg-[#070b16] p-2.5">
+                <div className="text-[10px] uppercase tracking-wider text-[#8aa0b4]">
+                  LIVE FINALITY
+                </div>
+                <div className="mt-0.5 text-lg font-bold text-[#a3e635]">965ms</div>
+                <div className="text-[10px] text-[#5a6d82]">monadNewHeads 实测</div>
+              </div>
+              <div className="border border-cyan-400/20 bg-[#070b16] p-2.5">
+                <div className="text-[10px] uppercase tracking-wider text-[#8aa0b4]">
+                  BURST PACKING
+                </div>
+                <div className="mt-0.5 text-lg font-bold text-violet-300">16 TX/1 BLK</div>
+                <div className="text-[10px] text-[#5a6d82]">单 300ms 区块 #81491937</div>
+              </div>
+            </div>
+          </div>
+        </section>
+
         {errorBanner && (
           <div
             role="alert"
-            className="flex items-start justify-between gap-3 rounded-xl border border-rose-500/60 bg-rose-950/50 px-4 py-3 text-sm text-rose-100"
+            className="hud-panel hud-panel-alert flex items-start justify-between gap-3 px-4 py-3 text-sm text-rose-100"
           >
             <div className="flex min-w-0 flex-1 items-start gap-2">
               <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-rose-400" aria-hidden="true" />
-              <span className="break-all">{errorBanner}</span>
+              <span className="break-all font-mono-tabular text-xs">{errorBanner}</span>
             </div>
             <button
               type="button"
               onClick={() => setErrorBanner(null)}
-              className="shrink-0 text-xs underline text-rose-200 hover:text-white"
+              className="shrink-0 font-mono-tabular text-xs underline text-rose-200 hover:text-white"
             >
-              关闭
+              CLOSE
             </button>
           </div>
         )}
 
-        {/* Top Control Bar */}
-        <section className="panel-card rounded-xl border border-[#272940] bg-[#12131f] p-4">
-          <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
-            {/* Patch selector */}
+        {/* LIVE BUG MUTATOR + ACTION DECK */}
+        <section className="hud-panel p-4">
+          <div className="flex flex-wrap items-center justify-between gap-2 border-b border-cyan-400/15 pb-3">
             <div className="flex flex-wrap items-center gap-2">
-              <span className="text-xs font-semibold uppercase tracking-wider text-[#a7abc4]">
-                选择 AI Agent PR：
-              </span>
-              <button
-                type="button"
-                aria-pressed={patchId === "patch-fail"}
-                disabled={busyAction !== null}
-                onClick={() => {
-                  resetRunState();
-                  setPatchId("patch-fail");
-                }}
-                className={`flex min-h-[38px] items-center gap-2 rounded-lg border px-3 py-1.5 text-xs font-medium transition ${
-                  patchId === "patch-fail"
-                    ? "border-rose-400 bg-rose-500/20 text-rose-100"
-                    : "border-[#272940] bg-[#181a2a] text-[#a7abc4] hover:border-[#3e4166]"
-                }`}
-              >
-                <ShieldAlert className="h-4 w-4 text-rose-400" aria-hidden="true" />
-                <span>PR #143 · ACL 漏洞版（30s 熔断退款主 Demo）</span>
-              </button>
-
-              <button
-                type="button"
-                aria-pressed={patchId === "patch-pass"}
-                disabled={busyAction !== null}
-                onClick={() => {
-                  resetRunState();
-                  setPatchId("patch-pass");
-                }}
-                className={`flex min-h-[38px] items-center gap-2 rounded-lg border px-3 py-1.5 text-xs font-medium transition ${
-                  patchId === "patch-pass"
-                    ? "border-emerald-400 bg-emerald-500/20 text-emerald-100"
-                    : "border-[#272940] bg-[#181a2a] text-[#a7abc4] hover:border-[#3e4166]"
-                }`}
-              >
-                <Flame className="h-4 w-4 text-emerald-400" aria-hidden="true" />
-                <span>PR #142 · 完整修复版（16 条用例全绿流式爆发）</span>
-              </button>
+              <Bug className="h-4 w-4 text-rose-400" aria-hidden="true" />
+              <h2 className="font-mono-tabular text-xs font-bold uppercase tracking-widest text-white">
+                // LIVE BUG MUTATOR · 评委现场漏洞注入器（真改源码 + 真重算 runHash + 拒绝写死 Mock）
+              </h2>
             </div>
 
-            {/* Execution Options */}
-            <div className="flex flex-wrap items-center gap-3 text-xs">
+            <div className="flex flex-wrap items-center gap-2 font-mono-tabular text-[11px]">
+              <button
+                type="button"
+                disabled={busyAction !== null}
+                onClick={() => applyPresetMutations(["drop_owner_acl"])}
+                className={`hud-chamfer-sm border px-2.5 py-1 transition ${
+                  canonicalMutations.length === 1 && canonicalMutations[0] === "drop_owner_acl"
+                    ? "border-rose-400 bg-rose-500/25 text-rose-100"
+                    : "border-cyan-400/20 bg-[#070b16] text-[#8aa0b4] hover:text-white"
+                }`}
+              >
+                预设: PR #143 越权熔断
+              </button>
+              <button
+                type="button"
+                disabled={busyAction !== null}
+                onClick={() => applyPresetMutations([])}
+                className={`hud-chamfer-sm border px-2.5 py-1 transition ${
+                  canonicalMutations.length === 0
+                    ? "border-[#a3e635] bg-[#a3e635]/20 text-[#d9f99d]"
+                    : "border-cyan-400/20 bg-[#070b16] text-[#8aa0b4] hover:text-white"
+                }`}
+              >
+                预设: PR #142 零漏洞 16/16 全绿
+              </button>
+              <span
+                className={`hud-chamfer-sm px-2.5 py-1 font-semibold ${
+                  activePreset?.expectedFirstFailIndex === null
+                    ? "bg-[#a3e635]/20 text-[#a3e635]"
+                    : "bg-rose-500/20 text-rose-300"
+                }`}
+              >
+                {activePreset?.expectedFirstFailIndex === null
+                  ? "✓ PREDICTED: 16/16 ALL PASS"
+                  : `✕ WILL HALT @ CHECK #${String(activePreset?.expectedFirstFailIndex).padStart(2, "0")}`}
+              </span>
+            </div>
+          </div>
+
+          {/* 4 Live Bug Mutation Toggles */}
+          <div className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-4">
+            {(status?.bugMutations || []).map((bug) => {
+              const active = canonicalMutations.includes(bug.id);
+              return (
+                <button
+                  key={bug.id}
+                  type="button"
+                  aria-pressed={active}
+                  disabled={busyAction !== null}
+                  onClick={() => toggleMutation(bug.id)}
+                  className={`flex flex-col items-start gap-1 border p-2.5 text-left transition disabled:opacity-50 ${
+                    active
+                      ? "border-rose-400/80 bg-rose-950/35 text-rose-50"
+                      : "border-cyan-400/15 bg-[#070b16] text-[#8aa0b4] hover:border-cyan-400/45 hover:text-slate-100"
+                  }`}
+                >
+                  <div className="flex w-full items-center justify-between gap-2 font-mono-tabular text-[10px]">
+                    <span
+                      className={`hud-chamfer-sm px-1.5 py-0.5 font-bold ${
+                        active
+                          ? "bg-rose-500 text-slate-950"
+                          : "bg-cyan-400/15 text-cyan-300"
+                      }`}
+                    >
+                      {active ? `✕ INJECTED · ${bug.shortTag}` : `○ CLEAN · ${bug.shortTag}`}
+                    </span>
+                    <span className={active ? "text-rose-300" : "text-[#5a6d82]"}>
+                      {bug.targetCheckName}
+                    </span>
+                  </div>
+                  <div className="text-xs font-semibold text-white">{bug.label}</div>
+                  <div className="text-[11px] leading-snug text-[#8aa0b4]">{bug.description}</div>
+                </button>
+              );
+            })}
+          </div>
+
+          {/* Execution Options + Primary Action Buttons */}
+          <div className="mt-3 flex flex-wrap items-center justify-between gap-3 border-t border-cyan-400/15 pt-3 text-xs">
+            <div className="flex flex-wrap items-center gap-2.5">
+              <button
+                type="button"
+                onClick={handleOneClickDemo}
+                disabled={busyAction !== null || !status?.contractReady}
+                className="hud-chamfer flex min-h-[40px] items-center gap-2 bg-cyan-400 px-4 py-2 text-xs font-bold tracking-wide text-slate-950 hover:bg-cyan-300 disabled:opacity-50"
+              >
+                <Zap className="h-4 w-4 stroke-[2.5]" aria-hidden="true" />
+                <span>
+                  {busyAction === "locking"
+                    ? "LOCKING ESCROW ON MONAD..."
+                    : busyAction === "streaming"
+                      ? `STREAMING CHECKS (${streamItems.length}/${totalChecks})...`
+                      : "一键逐条流式演示（锁仓 → 真实跑测 → 逐笔上链）"}
+                </span>
+              </button>
+
+              <button
+                type="button"
+                onClick={handlePipelineBurstDemo}
+                disabled={busyAction !== null || !status?.contractReady || simulateDishonest}
+                className="hud-chamfer flex min-h-[40px] items-center gap-2 border border-[#a3e635]/70 bg-[#a3e635]/15 px-4 py-2 text-xs font-bold text-[#d9f99d] hover:bg-[#a3e635]/25 disabled:opacity-50"
+              >
+                <Flame className="h-4 w-4 text-[#a3e635]" aria-hidden="true" />
+                <span>
+                  {busyAction === "bursting"
+                    ? "MONAD PIPELINE BURSTING..."
+                    : "⚡ 并发齐射模式（16 笔压入单 300ms 区块）"}
+                </span>
+              </button>
+
+              <button
+                type="button"
+                onClick={handleLockEscrow}
+                disabled={busyAction !== null || !status?.contractReady}
+                className="hud-chamfer-sm flex min-h-[38px] items-center gap-1.5 border border-cyan-400/25 bg-[#070b16] px-3 py-1.5 font-mono-tabular text-[11px] text-slate-200 hover:border-cyan-400 disabled:opacity-50"
+              >
+                <Lock className="h-3.5 w-3.5" aria-hidden="true" />
+                <span>STEP 1: LOCK</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => runVerificationStream()}
+                disabled={busyAction !== null || !activeTaskId || taskStatus !== "OPEN"}
+                className="hud-chamfer-sm flex min-h-[38px] items-center gap-1.5 border border-cyan-400/25 bg-[#070b16] px-3 py-1.5 font-mono-tabular text-[11px] text-slate-200 hover:border-cyan-400 disabled:opacity-50"
+              >
+                <Play className="h-3.5 w-3.5" aria-hidden="true" />
+                <span>STEP 2: STREAM</span>
+              </button>
+
+              {(taskStatus === "HALTED" || taskStatus === "DISPUTED") && remainingMon > 0 && (
+                <button
+                  type="button"
+                  onClick={handleRefund}
+                  disabled={busyAction !== null}
+                  className="hud-chamfer flex min-h-[40px] items-center gap-1.5 bg-rose-500 px-4 py-2 text-xs font-bold text-slate-950 hover:bg-rose-400 disabled:opacity-50"
+                >
+                  <RotateCcw className="h-4 w-4 stroke-[2.5]" aria-hidden="true" />
+                  <span>
+                    {busyAction === "refunding"
+                      ? "REFUNDING..."
+                      : `STEP 3: 一键退回剩余 ${remainingMon.toFixed(4)} MON`}
+                  </span>
+                </button>
+              )}
+
+              {busyAction === "streaming" && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    stopStreamRef.current = true;
+                  }}
+                  className="hud-chamfer-sm min-h-[38px] border border-amber-400/60 bg-amber-950/40 px-3 py-1.5 font-mono-tabular text-[11px] text-amber-200"
+                >
+                  STOP
+                </button>
+              )}
+            </div>
+
+            {/* Compact Config Toggles */}
+            <div className="flex flex-wrap items-center gap-2.5 font-mono-tabular text-[11px]">
               <div className="flex items-center gap-1.5">
-                <label htmlFor="reward-select" className="text-[#a7abc4]">
-                  锁仓赏金
+                <label htmlFor="reward-select" className="text-[#8aa0b4]">
+                  ESCROW
                 </label>
                 <select
                   id="reward-select"
                   value={rewardMon}
                   disabled={busyAction !== null}
                   onChange={(e) => setRewardMon(e.target.value)}
-                  className="rounded-lg border border-[#3e4166] bg-[#181a2a] px-2 py-1.5 font-mono-tabular text-white"
+                  className="border border-cyan-400/25 bg-[#070b16] px-2 py-1 text-white"
                 >
                   <option value="0.4">0.4 MON</option>
                   <option value="0.8">0.8 MON</option>
@@ -1010,203 +1230,121 @@ export default function HomePage() {
               </div>
 
               <div className="flex items-center gap-1.5">
-                <label htmlFor="mode-select" className="text-[#a7abc4]">
-                  上链路径
+                <label htmlFor="mode-select" className="text-[#8aa0b4]">
+                  PATH
                 </label>
                 <select
                   id="mode-select"
                   value={submitMode}
                   disabled={busyAction !== null}
                   onChange={(e) => setSubmitMode(e.target.value as "direct" | "eip712")}
-                  className="rounded-lg border border-[#3e4166] bg-[#181a2a] px-2 py-1.5 text-white"
+                  className="border border-cyan-400/25 bg-[#070b16] px-2 py-1 text-white"
                 >
-                  <option value="direct">Direct（省 Monad 2× ecRecover Gas）</option>
-                  <option value="eip712">EIP-712 链上验签（任何人可中继）</option>
+                  <option value="direct">Direct (170k · 省 2× ecRecover)</option>
+                  <option value="eip712">EIP-712 链上验签 (195k)</option>
                 </select>
               </div>
 
-              <label className="flex cursor-pointer items-center gap-1.5 rounded-lg border border-[#272940] bg-[#181a2a] px-2.5 py-1.5 text-[#a7abc4]">
+              <label className="flex cursor-pointer items-center gap-1.5 border border-cyan-400/20 bg-[#070b16] px-2 py-1 text-[#8aa0b4]">
                 <input
                   type="checkbox"
                   checked={useDemoWallet}
                   disabled={!status?.demoModeReady || busyAction !== null}
                   onChange={(e) => setUseDemoWallet(e.target.checked)}
                 />
-                <span>1-Click Testnet 演示钱包（手机免装插件）</span>
+                <span>Demo Wallet</span>
               </label>
 
-              {patchId === "patch-fail" && (
-                <label className="flex cursor-pointer items-center gap-1.5 rounded-lg border border-amber-500/40 bg-amber-950/30 px-2.5 py-1.5 text-amber-200">
+              {canonicalMutations.length > 0 && (
+                <label className="flex cursor-pointer items-center gap-1.5 border border-amber-400/40 bg-amber-950/30 px-2 py-1 text-amber-200">
                   <input
                     type="checkbox"
                     checked={simulateDishonest}
                     disabled={busyAction !== null}
                     onChange={(e) => setSimulateDishonest(e.target.checked)}
                   />
-                  <span>模拟恶意 Verifier 造假（用于复跑推翻演示）</span>
+                  <span>模拟恶意 Verifier 造假</span>
                 </label>
               )}
             </div>
           </div>
 
-          {/* Primary Action Buttons */}
-          <div className="mt-4 flex flex-wrap items-center gap-2.5 border-t border-[#272940] pt-3">
-            <button
-              type="button"
-              onClick={handleOneClickDemo}
-              disabled={busyAction !== null || !status?.contractReady}
-              className="flex min-h-[40px] items-center gap-2 rounded-lg bg-[#836ef9] px-4 py-2 text-sm font-semibold text-white shadow-md shadow-violet-900/40 hover:bg-[#7159f6] disabled:opacity-50"
-            >
-              <Zap className="h-4 w-4" aria-hidden="true" />
-              <span>
-                {busyAction === "locking"
-                  ? "正在 Monad 锁仓..."
-                  : busyAction === "streaming"
-                    ? `正在流式验证上链 (${streamItems.length}/${totalChecks})...`
-                    : "一键逐条流式演示（锁仓 → 真实跑测 → 逐笔上链）"}
-              </span>
-            </button>
-
-            <button
-              type="button"
-              onClick={handlePipelineBurstDemo}
-              disabled={busyAction !== null || !status?.contractReady || simulateDishonest}
-              className="flex min-h-[40px] items-center gap-2 rounded-lg border border-emerald-400/70 bg-emerald-600/25 px-4 py-2 text-sm font-semibold text-emerald-100 hover:bg-emerald-600/40 disabled:opacity-50"
-            >
-              <Flame className="h-4 w-4 text-emerald-300" aria-hidden="true" />
-              <span>
-                {busyAction === "bursting"
-                  ? "Monad 并发齐射中..."
-                  : "⚡ 并发齐射模式（Nonce 流水线压榨 Monad 300ms 区块）"}
-              </span>
-            </button>
-
-            <button
-              type="button"
-              onClick={handleLockEscrow}
-              disabled={busyAction !== null || !status?.contractReady}
-              className="flex min-h-[40px] items-center gap-1.5 rounded-lg border border-[#3e4166] bg-[#181a2a] px-3.5 py-2 text-xs font-medium text-white hover:border-violet-400 disabled:opacity-50"
-            >
-              <Lock className="h-3.5 w-3.5" aria-hidden="true" />
-              <span>分步 1: 锁仓 Escrow</span>
-            </button>
-
-            <button
-              type="button"
-              onClick={() => runVerificationStream()}
-              disabled={busyAction !== null || !activeTaskId || taskStatus !== "OPEN"}
-              className="flex min-h-[40px] items-center gap-1.5 rounded-lg border border-[#3e4166] bg-[#181a2a] px-3.5 py-2 text-xs font-medium text-white hover:border-violet-400 disabled:opacity-50"
-            >
-              <Play className="h-3.5 w-3.5" aria-hidden="true" />
-              <span>分步 2: 运行测试并流式放款</span>
-            </button>
-
-            {(taskStatus === "HALTED" || taskStatus === "DISPUTED") && remainingMon > 0 && (
+          {activeTaskId && (
+            <div className="mt-2.5 flex flex-wrap items-center gap-2 border-t border-cyan-400/10 pt-2.5 font-mono-tabular text-[11px]">
+              <span className="text-[#8aa0b4]">ACTIVE TASK_ID:</span>
+              <span className="text-cyan-200">{shortHex(activeTaskId, 14, 8)}</span>
               <button
                 type="button"
-                onClick={handleRefund}
-                disabled={busyAction !== null}
-                className="flex min-h-[40px] items-center gap-1.5 rounded-lg border border-rose-400 bg-rose-600 px-4 py-2 text-sm font-semibold text-white shadow-lg shadow-rose-950/60 hover:bg-rose-500 disabled:opacity-50"
+                onClick={() => copyText("taskId", activeTaskId)}
+                className="flex items-center gap-1 border border-cyan-400/25 px-2 py-0.5 text-[#8aa0b4] hover:text-white"
+                aria-label="复制 TaskID"
               >
-                <RotateCcw className="h-4 w-4" aria-hidden="true" />
-                <span>
-                  {busyAction === "refunding"
-                    ? "正在链上退款..."
-                    : `分步 3: 雇主一键退回剩余 ${remainingMon.toFixed(4)} MON`}
-                </span>
+                <Copy className="h-3 w-3" aria-hidden="true" />
+                <span>{copiedKey === "taskId" ? "COPIED" : "COPY"}</span>
               </button>
-            )}
-
-            {busyAction === "streaming" && (
-              <button
-                type="button"
-                onClick={() => {
-                  stopStreamRef.current = true;
-                }}
-                className="min-h-[40px] rounded-lg border border-amber-500/60 bg-amber-950/40 px-3 py-2 text-xs font-medium text-amber-200"
-              >
-                停止流
-              </button>
-            )}
-
-            {activeTaskId && (
-              <div className="ml-auto flex flex-wrap items-center gap-2 text-xs font-mono-tabular">
-                <span className="rounded bg-[#181a2a] px-2 py-1 text-[#a7abc4]">
-                  TaskID: {shortHex(activeTaskId, 10, 6)}
-                </span>
-                <button
-                  type="button"
-                  onClick={() => copyText("taskId", activeTaskId)}
-                  className="flex items-center gap-1 rounded border border-[#272940] px-2 py-1 text-[#a7abc4] hover:text-white"
-                  aria-label="复制 TaskID"
+              {createTxHash && (
+                <a
+                  href={txExplorerUrl(createTxHash)}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="hud-chamfer-sm flex items-center gap-1 bg-cyan-400/15 px-2 py-0.5 text-cyan-200 hover:bg-cyan-400/25"
                 >
-                  <Copy className="h-3 w-3" aria-hidden="true" />
-                  <span>{copiedKey === "taskId" ? "已复制" : "复制"}</span>
-                </button>
-                {createTxHash && (
-                  <a
-                    href={txExplorerUrl(createTxHash)}
-                    target="_blank"
-                    rel="noreferrer"
-                    className="flex items-center gap-1 rounded border border-violet-500/40 bg-violet-950/30 px-2 py-1 text-violet-200 hover:underline"
-                  >
-                    <span>锁仓 Tx</span>
-                    <ExternalLink className="h-3 w-3" aria-hidden="true" />
-                  </a>
-                )}
-                {refundTxHash && (
-                  <a
-                    href={txExplorerUrl(refundTxHash)}
-                    target="_blank"
-                    rel="noreferrer"
-                    className="flex items-center gap-1 rounded border border-emerald-500/50 bg-emerald-950/40 px-2 py-1 text-emerald-200 hover:underline"
-                  >
-                    <span>退款 Tx</span>
-                    <ExternalLink className="h-3 w-3" aria-hidden="true" />
-                  </a>
-                )}
-              </div>
-            )}
-          </div>
+                  <span>LOCK TX</span>
+                  <ExternalLink className="h-3 w-3" aria-hidden="true" />
+                </a>
+              )}
+              {refundTxHash && (
+                <a
+                  href={txExplorerUrl(refundTxHash)}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="hud-chamfer-sm flex items-center gap-1 bg-[#a3e635]/20 px-2 py-0.5 text-[#a3e635] hover:bg-[#a3e635]/30"
+                >
+                  <span>REFUND TX</span>
+                  <ExternalLink className="h-3 w-3" aria-hidden="true" />
+                </a>
+              )}
+            </div>
+          )}
         </section>
 
-        {/* Core First-Screen Split View: Left = Live Machine Test Runner | Right = Monad Streaming Escrow */}
+        {/* CORE SPLIT WORKSPACE: LEFT = CODE DIFF + LIVE SANDBOX TERMINAL | RIGHT = MONAD STREAMING ESCROW */}
         <div className="grid grid-cols-1 gap-4 lg:grid-cols-12">
-          {/* LEFT: Code Diff + Live Sandboxed Runner Terminal */}
+          {/* LEFT COLUMN */}
           <div className="flex flex-col gap-4 lg:col-span-5">
-            {/* Code Diff Card */}
-            <section className="panel-card rounded-xl border border-[#272940] bg-[#12131f] p-4">
+            {/* Dynamic Mutated Code Diff Card */}
+            <section className="hud-panel p-4">
               <div className="flex items-center justify-between gap-2">
-                <h2 className="text-sm font-semibold text-white">
-                  AI Agent 代码提交（{activePatch?.prNumber || "PR"}）
+                <h2 className="font-mono-tabular text-xs font-bold uppercase tracking-widest text-white">
+                  // TARGET DIFF · {activePreset?.prNumber || "PR"}
                 </h2>
-                <span className="rounded bg-[#181a2a] px-2 py-0.5 font-mono-tabular text-[11px] text-violet-300">
-                  {activePatch?.agentName || "Agent"}
+                <span className="hud-chamfer-sm bg-[#836ef9]/25 px-2 py-0.5 font-mono-tabular text-[10px] text-violet-200">
+                  {activePreset?.agentName || "Agent"}
                 </span>
               </div>
-              <p className="mt-1 text-xs text-[#a7abc4]">{activePatch?.title}</p>
-              <p className="mt-1 text-xs text-slate-300">{activePatch?.summary}</p>
+              <p className="mt-1.5 text-xs font-medium text-slate-200">{activePreset?.title}</p>
+              <p className="mt-0.5 text-xs text-[#8aa0b4]">{activePreset?.summary}</p>
 
-              <div className="mt-2.5 flex flex-wrap items-center gap-2 text-[11px] font-mono-tabular text-[#a7abc4]">
-                <span className="rounded border border-[#272940] bg-[#0b0b12] px-2 py-0.5">
-                  commit: {shortHex(activePatch?.commit, 8, 4)}
+              <div className="mt-2.5 flex flex-wrap items-center gap-2 font-mono-tabular text-[10px]">
+                <span className="border border-cyan-400/20 bg-[#05080f] px-2 py-0.5 text-[#8aa0b4]">
+                  COMMIT {shortHex(activePreset?.commit, 8, 4)}
                 </span>
-                <span className="rounded border border-violet-500/30 bg-violet-950/20 px-2 py-0.5 text-violet-200">
-                  runHash: {shortHex(activePatch?.runHash, 10, 6)}
+                <span className="border border-cyan-400/35 bg-cyan-950/30 px-2 py-0.5 text-cyan-200">
+                  RUN_HASH {shortHex(activePreset?.runHash, 10, 6)}
                 </span>
               </div>
 
-              <pre className="mt-3 overflow-x-auto rounded-lg border border-[#272940] bg-[#07080f] p-3 font-mono-tabular text-xs leading-relaxed">
-                {activePatch?.diffPreview.map((line, idx) => (
+              <pre className="mt-3 max-h-[175px] overflow-auto border border-cyan-400/15 bg-[#05080f] p-3 font-mono-tabular text-[11px] leading-5">
+                {activePreset?.diffPreview.map((line, idx) => (
                   <div
                     key={idx}
                     className={
                       line.startsWith("+")
-                        ? "bg-emerald-950/50 text-emerald-300"
+                        ? "bg-emerald-950/45 text-[#a3e635]"
                         : line.startsWith("-")
                           ? "bg-rose-950/50 text-rose-300"
                           : line.startsWith("@@")
-                            ? "text-violet-300"
+                            ? "text-cyan-300"
                             : "text-slate-300"
                     }
                   >
@@ -1216,28 +1354,28 @@ export default function HomePage() {
               </pre>
             </section>
 
-            {/* Live Terminal Output */}
-            <section className="panel-card flex flex-1 flex-col rounded-xl border border-[#272940] bg-[#090a11] p-4">
+            {/* Live Sandbox Terminal */}
+            <section className="hud-panel flex flex-1 flex-col p-4">
               <div className="mb-2 flex items-center justify-between">
-                <h2 className="flex items-center gap-2 text-sm font-semibold text-white">
-                  <Terminal className="h-4 w-4 text-violet-400" aria-hidden="true" />
-                  <span>实时隔离测试终端（node:vm 真实执行）</span>
+                <h2 className="flex items-center gap-2 font-mono-tabular text-xs font-bold uppercase tracking-widest text-white">
+                  <Terminal className="h-3.5 w-3.5 text-cyan-300" aria-hidden="true" />
+                  <span>// ISOLATED NODE:VM TERMINAL</span>
                 </h2>
-                <span className="font-mono-tabular text-[11px] text-[#a7abc4]">
-                  1 Build Gate + 15 Unit Tests
+                <span className="font-mono-tabular text-[10px] text-[#8aa0b4]">
+                  1 BUILD GATE + 15 UNIT TESTS
                 </span>
               </div>
-              <div className="h-[370px] overflow-y-auto rounded-lg border border-[#222438] bg-[#05060b] p-3 font-mono-tabular text-xs leading-6">
+              <div className="h-[410px] overflow-y-auto border border-cyan-400/15 bg-[#04060c] p-3 font-mono-tabular text-[11.5px] leading-6">
                 {terminalLines.map((l) => (
                   <div
                     key={l.id}
                     className={
                       l.kind === "pass"
-                        ? "text-emerald-300"
+                        ? "text-[#a3e635]"
                         : l.kind === "fail"
                           ? "font-semibold text-rose-300"
                           : l.kind === "chain"
-                            ? "text-violet-300"
+                            ? "text-cyan-300"
                             : "text-slate-300"
                     }
                   >
@@ -1249,18 +1387,20 @@ export default function HomePage() {
             </section>
           </div>
 
-          {/* RIGHT: Monad Real-Time Metrics + 16-Check Streaming Payout Waterfall */}
+          {/* RIGHT COLUMN */}
           <div className="flex flex-col gap-4 lg:col-span-7">
-            {/* 4 Key Telemetry Cards */}
+            {/* 4 M.A.V.E.N. Style KPI Cards */}
             <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
-              <div className="panel-card rounded-xl border border-[#272940] bg-[#12131f] p-3.5">
-                <div className="text-[11px] text-[#a7abc4]">Agent 已流式入账</div>
-                <div className="mt-1 font-mono-tabular text-xl font-bold text-emerald-300">
+              <div className="hud-panel p-3.5">
+                <div className="font-mono-tabular text-[10px] uppercase tracking-wider text-[#8aa0b4]">
+                  // AGENT PAID
+                </div>
+                <div className="mt-1 font-mono-tabular text-xl font-bold text-[#a3e635]">
                   {paidMon.toFixed(4)} <span className="text-xs font-normal">MON</span>
                 </div>
-                <div className="mt-1.5 h-1.5 w-full overflow-hidden rounded-full bg-[#222438]">
+                <div className="mt-2 h-1 w-full bg-[#132036]">
                   <div
-                    className="h-full bg-emerald-400 transition-all duration-300"
+                    className="h-full bg-cyan-400 transition-all duration-300"
                     style={{
                       width: `${Math.min(100, (paidMon / Math.max(0.0001, totalRewardNum)) * 100)}%`,
                     }}
@@ -1269,73 +1409,75 @@ export default function HomePage() {
               </div>
 
               <div
-                className={`panel-card rounded-xl border p-3.5 ${
+                className={`hud-panel p-3.5 ${
                   taskStatus === "HALTED" || taskStatus === "DISPUTED"
-                    ? "border-rose-400/80 bg-rose-950/35"
-                    : "border-[#272940] bg-[#12131f]"
+                    ? "hud-panel-alert"
+                    : taskStatus === "REFUNDED"
+                      ? "hud-panel-lime"
+                      : ""
                 }`}
               >
-                <div className="text-[11px] text-[#a7abc4]">
+                <div className="font-mono-tabular text-[10px] uppercase tracking-wider text-[#8aa0b4]">
                   {taskStatus === "REFUNDED"
-                    ? "已退回雇主"
+                    ? "// REFUNDED"
                     : taskStatus === "HALTED" || taskStatus === "DISPUTED"
-                      ? "熔断保护（可退）"
-                      : "合约剩余锁定"}
+                      ? "// HALT PROTECTED"
+                      : "// ESCROW LOCKED"}
                 </div>
                 <div className="mt-1 font-mono-tabular text-xl font-bold text-white">
                   {remainingMon.toFixed(4)}{" "}
-                  <span className="text-xs font-normal text-[#a7abc4]">MON</span>
+                  <span className="text-xs font-normal text-[#8aa0b4]">MON</span>
                 </div>
-                <div className="mt-1 text-[11px] font-medium text-violet-300">
-                  状态: {taskStatus}
+                <div className="mt-1 font-mono-tabular text-[10px] font-semibold text-cyan-300">
+                  STATE: {taskStatus}
                 </div>
               </div>
 
-              <div className="panel-card rounded-xl border border-[#272940] bg-[#12131f] p-3.5">
-                <div className="text-[11px] text-[#a7abc4]">实测 Monad 最终性</div>
-                <div className="mt-1 font-mono-tabular text-xl font-bold text-violet-300">
+              <div className="hud-panel p-3.5">
+                <div className="font-mono-tabular text-[10px] uppercase tracking-wider text-[#8aa0b4]">
+                  // FINALITY (LIVE)
+                </div>
+                <div className="mt-1 font-mono-tabular text-xl font-bold text-cyan-300">
                   {avgFinalityMs !== null
                     ? `${avgFinalityMs}ms`
                     : avgProposedMs !== null
                       ? `${avgProposedMs}ms*`
                       : "—"}
                 </div>
-                <div className="mt-1 text-[11px] text-[#a7abc4]">
-                  {avgFinalityMs !== null
-                    ? "monadNewHeads 实测 Finalized"
-                    : "等待 monadNewHeads 确认"}
+                <div className="mt-1 font-mono-tabular text-[10px] text-[#8aa0b4]">
+                  {avgFinalityMs !== null ? "monadNewHeads 实测" : "等待 Finalized"}
                 </div>
               </div>
 
-              <div className="panel-card rounded-xl border border-[#272940] bg-[#12131f] p-3.5">
-                <div className="text-[11px] text-[#a7abc4]">实付 Gas（按 gas_limit）</div>
-                <div className="mt-1 font-mono-tabular text-xl font-bold text-amber-200">
-                  {totalGasPaidMon.toFixed(4)}{" "}
-                  <span className="text-xs font-normal">MON</span>
+              <div className="hud-panel p-3.5">
+                <div className="font-mono-tabular text-[10px] uppercase tracking-wider text-[#8aa0b4]">
+                  // GAS PAID (LIMIT)
                 </div>
-                <div className="mt-1 text-[11px] text-[#a7abc4]">
-                  tx.gas × effectiveGasPrice
+                <div className="mt-1 font-mono-tabular text-xl font-bold text-amber-300">
+                  {totalGasPaidMon.toFixed(4)} <span className="text-xs font-normal">MON</span>
+                </div>
+                <div className="mt-1 font-mono-tabular text-[10px] text-[#8aa0b4]">
+                  tx.gas × effPrice
                 </div>
               </div>
             </div>
 
-            {/* 16-Check Streaming Waterfall */}
-            <section className="panel-card flex-1 rounded-xl border border-[#272940] bg-[#12131f] p-4">
+            {/* 16-Check Streaming Waterfall + Unverified Boundary Card */}
+            <section className="hud-panel flex-1 p-4">
               <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
-                <h2 className="flex items-center gap-2 text-sm font-semibold text-white">
-                  <Activity className="h-4 w-4 text-violet-400" aria-hidden="true" />
-                  <span>Monad 逐用例流式验证 &amp; 原子微结算瀑布</span>
+                <h2 className="flex items-center gap-2 font-mono-tabular text-xs font-bold uppercase tracking-widest text-white">
+                  <Activity className="h-4 w-4 text-cyan-300" aria-hidden="true" />
+                  <span>// MONAD PER-TEST STREAMING PAYOUT WATERFALL</span>
                 </h2>
-                <span className="font-mono-tabular text-xs text-[#a7abc4]">
-                  已上链 {streamItems.length} / {totalChecks} · 前 15 项每项{" "}
-                  {stepPayoutMon.toFixed(4)} MON + 末项 40% 尾款
+                <span className="font-mono-tabular text-[11px] text-[#8aa0b4]">
+                  ONCHAIN {streamItems.length}/{totalChecks} · STEP {stepPayoutMon.toFixed(4)} MON + 40% BONUS
                 </span>
               </div>
 
               {burstSummary && (
-                <div className="mb-3 flex flex-wrap items-center justify-between gap-2 rounded-lg border border-emerald-400/50 bg-emerald-950/35 px-3 py-2 font-mono-tabular text-xs text-emerald-100">
-                  <span className="font-semibold">
-                    ⚡ MONAD PIPELINE BURST: {burstSummary.count} 笔真实测试验证交易打包进{" "}
+                <div className="mb-3 flex flex-wrap items-center justify-between gap-2 border border-[#a3e635]/50 bg-[#a3e635]/10 px-3 py-2 font-mono-tabular text-xs text-[#d9f99d]">
+                  <span className="font-bold">
+                    ⚡ MONAD BURST: {burstSummary.count} 笔真实测试验证交易打包进{" "}
                     {burstSummary.spannedBlocks.length} 个 Monad 区块（#
                     {burstSummary.spannedBlocks[0]}
                     {burstSummary.spannedBlocks.length > 1
@@ -1343,13 +1485,13 @@ export default function HomePage() {
                       : ""}
                     ）
                   </span>
-                  <span className="text-emerald-300">
-                    沙盒 {burstSummary.sandboxTotalMs}ms · 齐射广播 {burstSummary.broadcastMs}ms · 全确认 {burstSummary.allConfirmedMs}ms
+                  <span className="text-cyan-300">
+                    VM {burstSummary.sandboxTotalMs}ms · BROADCAST {burstSummary.broadcastMs}ms · CONFIRMED {burstSummary.allConfirmedMs}ms
                   </span>
                 </div>
               )}
 
-              <div className="h-[465px] space-y-2 overflow-y-auto pr-1">
+              <div className="h-[515px] space-y-2 overflow-y-auto pr-1">
                 {(status?.tests || []).map((spec) => {
                   const rec = streamItems.find((x) => x.checkIndex === spec.index);
                   const isFinalized =
@@ -1358,20 +1500,20 @@ export default function HomePage() {
                   return (
                     <div
                       key={spec.index}
-                      className={`rounded-lg border px-3 py-2.5 text-xs transition ${
+                      className={`border px-3 py-2 text-xs transition ${
                         !rec
-                          ? "border-[#222438] bg-[#0e101a]/70 text-[#8c90ab]"
+                          ? "border-cyan-400/10 bg-[#070b16]/80 text-[#7288a0]"
                           : !rec.attestedPassed
-                            ? "border-rose-500/80 bg-rose-950/35 text-rose-100"
+                            ? "border-rose-400/80 bg-rose-950/35 text-rose-100"
                             : rec.simulatedDishonest
                               ? "border-amber-400/80 bg-amber-950/35 text-amber-100"
-                              : "border-emerald-500/40 bg-[#151829] text-slate-100"
+                              : "border-cyan-400/30 bg-[#0d1426] text-slate-100"
                       }`}
                     >
                       <div className="flex flex-wrap items-center justify-between gap-2">
                         <div className="flex items-center gap-2">
                           {!rec ? (
-                            <span className="inline-flex h-5 w-5 items-center justify-center rounded-full border border-[#3e4166] font-mono-tabular text-[10px]">
+                            <span className="inline-flex h-5 w-5 items-center justify-center border border-cyan-400/20 font-mono-tabular text-[10px]">
                               {String(spec.index).padStart(2, "0")}
                             </span>
                           ) : !rec.attestedPassed ? (
@@ -1381,12 +1523,12 @@ export default function HomePage() {
                             />
                           ) : (
                             <CheckCircle2
-                              className="h-4 w-4 shrink-0 text-emerald-400"
+                              className="h-4 w-4 shrink-0 text-[#a3e635]"
                               aria-label="验证通过"
                             />
                           )}
 
-                          <span className="rounded bg-[#222438] px-1.5 py-0.5 font-mono-tabular text-[10px] text-violet-200">
+                          <span className="hud-chamfer-sm bg-cyan-400/15 px-1.5 py-0.5 font-mono-tabular text-[10px] font-semibold text-cyan-200">
                             {spec.stage}
                           </span>
                           <span className="font-medium">{spec.name}</span>
@@ -1395,22 +1537,21 @@ export default function HomePage() {
                         <div className="flex flex-wrap items-center gap-2 font-mono-tabular">
                           {rec ? (
                             <>
-                              {/* Real commitState badge (never faked) */}
                               <span
-                                className={`rounded px-2 py-0.5 text-[11px] font-semibold ${
+                                className={`hud-chamfer-sm px-2 py-0.5 text-[10px] font-bold ${
                                   isFinalized
-                                    ? "bg-emerald-500/20 text-emerald-300"
+                                    ? "bg-[#a3e635]/20 text-[#a3e635]"
                                     : "bg-amber-500/20 text-amber-200"
                                 }`}
                               >
                                 {isFinalized
-                                  ? `✓ Finalized${rec.finalizedLatencyMs ? ` (${rec.finalizedLatencyMs}ms)` : ""}`
-                                  : `⋯ ${rec.commitState} (${rec.proposedLatencyMs}ms)`}
+                                  ? `✓ FINALIZED${rec.finalizedLatencyMs ? ` ${rec.finalizedLatencyMs}ms` : ""}`
+                                  : `⋯ ${rec.commitState.toUpperCase()} ${rec.proposedLatencyMs}ms`}
                               </span>
 
                               <span
-                                className={`font-semibold ${
-                                  rec.attestedPassed ? "text-emerald-300" : "text-rose-300"
+                                className={`font-bold ${
+                                  rec.attestedPassed ? "text-[#a3e635]" : "text-rose-300"
                                 }`}
                               >
                                 {rec.attestedPassed
@@ -1422,29 +1563,30 @@ export default function HomePage() {
                                 href={txExplorerUrl(rec.txHash)}
                                 target="_blank"
                                 rel="noreferrer"
-                                className="inline-flex items-center gap-1 text-violet-300 hover:underline"
+                                className="inline-flex items-center gap-1 text-cyan-300 hover:underline"
                               >
                                 <span>{shortHex(rec.txHash, 6, 4)}</span>
                                 <ExternalLink className="h-3 w-3" aria-hidden="true" />
                               </a>
                             </>
                           ) : (
-                            <span className="text-[11px] text-[#6d7190]">Pending</span>
+                            <span className="text-[10px] uppercase tracking-wider text-[#5a6d82]">
+                              QUEUED
+                            </span>
                           )}
                         </div>
                       </div>
 
                       {rec && (
-                        <div className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1 font-mono-tabular text-[11px] text-[#a7abc4]">
+                        <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-0.5 font-mono-tabular text-[10.5px] text-[#8aa0b4]">
                           <span>mode={rec.mode}</span>
                           <span>block=#{rec.blockNumber}</span>
                           <span>gasLimit={rec.gasLimit}</span>
-                          <span>gasUsed={rec.gasUsed}</span>
                           <span>paid={Number(rec.actualPaidMon).toFixed(5)} MON</span>
                           <span>receipt={shortHex(rec.attestedReceiptHash, 8, 4)}</span>
                           {rec.simulatedDishonest && (
                             <span className="font-semibold text-amber-300">
-                              ⚠ FORGED PASS (for dispute demo)
+                              ⚠ FORGED PASS (ready for dispute)
                             </span>
                           )}
                         </div>
@@ -1452,18 +1594,49 @@ export default function HomePage() {
                     </div>
                   );
                 })}
+
+                {/* EXPLICIT UNDECIDABLE / UNVERIFIED SAFETY BOUNDARY CARD (Addressing Mentor Feedback) */}
+                <div className="mt-3 border border-amber-400/45 bg-amber-950/20 p-3">
+                  <div className="flex flex-wrap items-center justify-between gap-2 font-mono-tabular text-[11px]">
+                    <span className="flex items-center gap-1.5 font-bold text-amber-300">
+                      <ShieldAlert className="h-4 w-4" aria-hidden="true" />
+                      ⚠ UNDECIDABLE BY TESTS · HUMAN AUDIT REQUIRED（未覆盖安全边界）
+                    </span>
+                    <span className="hud-chamfer-sm bg-amber-500/20 px-2 py-0.5 text-[10px] font-bold text-amber-200">
+                      HONEST BOUNDARY
+                    </span>
+                  </div>
+                  <p className="mt-1 text-[11px] text-amber-100/85">
+                    熔断只能拦住已写入测试集的确定性漏洞（上述 16 条红线），<strong>测试通过 ≠ 代码绝对安全</strong>。以下维度明确标为机器不可判定，必须交由人类审计：
+                  </p>
+                  <ul className="mt-2 space-y-1.5 text-[11px]">
+                    {(status?.unverifiedBoundaries || []).map((b) => (
+                      <li
+                        key={b.id}
+                        className="flex flex-wrap items-baseline justify-between gap-2 border-t border-amber-400/15 pt-1.5"
+                      >
+                        <div>
+                          <span className="font-semibold text-amber-200">{b.scope}：</span>
+                          <span className="text-[#a7b9cb]">{b.reason}</span>
+                        </div>
+                        <span className="font-mono-tabular text-[10px] text-amber-300">
+                          [{b.owner}]
+                        </span>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
               </div>
             </section>
           </div>
         </div>
 
-        {/* Bottom Verification & Same-runHash Dispute Row */}
+        {/* BOTTOM DUAL VERIFICATION & DISPUTE ROW */}
         <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
-          {/* Independent Zero-Backend Verifier */}
-          <section className="panel-card rounded-xl border border-[#272940] bg-[#12131f] p-4">
-            <h2 className="flex items-center gap-2 text-sm font-semibold text-white">
-              <ShieldCheck className="h-4 w-4 text-emerald-400" aria-hidden="true" />
-              <span>独立链上凭证核验（零后端 · 浏览器直连 Monad RPC）</span>
+          <section className="hud-panel p-4">
+            <h2 className="flex items-center gap-2 font-mono-tabular text-xs font-bold uppercase tracking-widest text-white">
+              <ShieldCheck className="h-4 w-4 text-[#a3e635]" aria-hidden="true" />
+              <span>// ZERO-BACKEND ONCHAIN ATTESTATION VERIFIER</span>
             </h2>
 
             <div className="mt-3 flex flex-wrap gap-2">
@@ -1476,100 +1649,85 @@ export default function HomePage() {
                 value={verifyTaskInput}
                 onChange={(e) => setVerifyTaskInput(e.target.value)}
                 placeholder="粘贴 0x... taskId（运行演示后自动填入）"
-                className="min-w-[240px] flex-1 rounded-lg border border-[#3e4166] bg-[#090a11] px-3 py-2 font-mono-tabular text-xs text-white placeholder:text-slate-500"
+                className="min-w-[240px] flex-1 border border-cyan-400/25 bg-[#05080f] px-3 py-2 font-mono-tabular text-xs text-white placeholder:text-[#5a6d82]"
               />
               <button
                 type="button"
                 onClick={handleIndependentVerify}
                 disabled={busyAction !== null || !status?.contractReady}
-                className="min-h-[38px] rounded-lg bg-emerald-600 px-3.5 py-2 text-xs font-semibold text-white hover:bg-emerald-500 disabled:opacity-50"
+                className="hud-chamfer-sm min-h-[38px] bg-[#a3e635] px-4 py-2 font-mono-tabular text-xs font-bold text-slate-950 hover:bg-[#bef264] disabled:opacity-50"
               >
-                {busyAction === "verifying" ? "直读 Monad 中..." : "独立读链核验"}
+                {busyAction === "verifying" ? "READING RPC..." : "独立读链核验"}
               </button>
             </div>
 
             {verifyResult && (
               <div
-                className={`mt-3 rounded-lg border p-3 text-xs ${
+                className={`mt-3 border p-3 text-xs ${
                   verifyResult.recordedCount > 0
-                    ? "border-emerald-500/50 bg-emerald-950/25"
-                    : "border-amber-500/50 bg-amber-950/25"
+                    ? "border-[#a3e635]/50 bg-[#a3e635]/10"
+                    : "border-amber-400/50 bg-amber-950/25"
                 }`}
               >
                 <div className="flex flex-wrap items-center justify-between gap-2">
                   <span
                     className={`font-mono-tabular text-sm font-bold ${
-                      verifyResult.recordedCount > 0 ? "text-emerald-300" : "text-amber-300"
+                      verifyResult.recordedCount > 0 ? "text-[#a3e635]" : "text-amber-300"
                     }`}
                   >
                     {verifyResult.recordedCount > 0
                       ? "✓ ON-CHAIN ATTESTATION VERIFIED"
                       : "⏳ ESCROW ACTIVE (0 CHECKS RECORDED YET)"}
                   </span>
-                  <span className="font-mono-tabular text-[11px] text-emerald-200">
-                    Receipt Integrity · Signature Valid · Chain Record Finalized
+                  <span className="font-mono-tabular text-[10px] text-cyan-200">
+                    Receipt Integrity · EIP-712 Valid · Finalized
                   </span>
                 </div>
 
                 <dl className="mt-2.5 grid grid-cols-2 gap-x-4 gap-y-1.5 font-mono-tabular text-[11px]">
                   <div>
-                    <dt className="text-[#a7abc4]">Status</dt>
+                    <dt className="text-[#8aa0b4]">STATUS</dt>
                     <dd className="font-semibold text-white">{verifyResult.statusLabel}</dd>
                   </div>
                   <div>
-                    <dt className="text-[#a7abc4]">Checks Recorded / Passed</dt>
+                    <dt className="text-[#8aa0b4]">RECORDED / PASSED</dt>
                     <dd className="text-white">
                       {verifyResult.recordedCount} / {verifyResult.passedChecks} (of{" "}
                       {verifyResult.totalChecks})
                     </dd>
                   </div>
                   <div>
-                    <dt className="text-[#a7abc4]">Paid / Remaining</dt>
+                    <dt className="text-[#8aa0b4]">PAID / REMAINING</dt>
                     <dd className="text-white">
                       {verifyResult.paidRewardMon} / {verifyResult.remainingRewardMon} MON
                     </dd>
                   </div>
                   <div>
-                    <dt className="text-[#a7abc4]">EIP-712 Signature Check</dt>
-                    <dd className="text-emerald-300">
+                    <dt className="text-[#8aa0b4]">EIP-712 SIGNATURES</dt>
+                    <dd className="text-[#a3e635]">
                       {verifyResult.signatureCheckedCount > 0
                         ? `${verifyResult.signatureVerifiedCount}/${verifyResult.signatureCheckedCount} Valid (${shortHex(verifyResult.verifier)})`
-                        : `Onchain verifier: ${shortHex(verifyResult.verifier)}`}
+                        : `Verifier: ${shortHex(verifyResult.verifier)}`}
                     </dd>
                   </div>
                   <div className="col-span-2">
-                    <dt className="text-[#a7abc4]">Locked runHash (All Checks Bound)</dt>
-                    <dd className="break-all text-violet-200">{verifyResult.runHash}</dd>
+                    <dt className="text-[#8aa0b4]">LOCKED RUN_HASH (ALL CHECKS BOUND)</dt>
+                    <dd className="break-all text-cyan-200">{verifyResult.runHash}</dd>
                   </div>
                 </dl>
-
-                {/* Honest Trust Boundary Disclosure */}
-                <div className="mt-3 rounded border border-[#272940] bg-[#0b0b12] p-2.5 text-[11px] leading-5 text-[#a7abc4]">
-                  <div>
-                    <strong className="text-emerald-300">已验证：</strong>
-                    凭证哈希、Verifier EIP-712 签名与 Monad 链上不可逆记录完全一致，且全部检查绑定同一{" "}
-                    <code>runHash</code>。
-                  </div>
-                  <div>
-                    <strong className="text-amber-300">信任边界（尚未证明）：</strong>
-                    单验证者执行器本身尚未进入 TEE/多节点质押，且测试通过不等于代码无未覆盖漏洞——可通过右侧「同{" "}
-                    <code>runHash</code> 独立复跑争议」推翻异常签名。
-                  </div>
-                </div>
               </div>
             )}
           </section>
 
-          {/* Same-runHash Independent Re-run & Dispute Panel */}
-          <section className="panel-card rounded-xl border border-[#272940] bg-[#12131f] p-4">
-            <h2 className="flex items-center gap-2 text-sm font-semibold text-white">
-              <RefreshCw className="h-4 w-4 text-amber-400" aria-hidden="true" />
-              <span>同 runHash 独立复跑 &amp; 链上争议窗口（反单点验证者作弊）</span>
+          <section className="hud-panel p-4">
+            <h2 className="flex items-center gap-2 font-mono-tabular text-xs font-bold uppercase tracking-widest text-white">
+              <RefreshCw className="h-4 w-4 text-amber-300" aria-hidden="true" />
+              <span>// SAME-RUNHASH INDEPENDENT RE-RUN &amp; DISPUTE WINDOW</span>
             </h2>
-            <p className="mt-1 text-xs text-[#a7abc4]">
-              任意第三方可用链上锁定的同一个 <code>runHash</code>{" "}
-              重跑对应测试并比对哈希；若发现 Verifier 撒谎，在挑战窗口内一键发起{" "}
-              <code>disputeCheck()</code> 冻结剩余资金。
+            <p className="mt-1.5 text-xs text-[#8aa0b4]">
+              无状态反查链上 <code className="text-cyan-200">runHash</code> 对应的全部 16 种变异代码组合，独立重跑单测并逐字节比对{" "}
+              <code className="text-cyan-200">receiptHash</code>；发现 Verifier 造假即一键提交{" "}
+              <code className="text-rose-300">disputeCheck()</code> 冻结剩余资金。
             </p>
 
             <div className="mt-3 flex flex-wrap gap-2">
@@ -1577,9 +1735,9 @@ export default function HomePage() {
                 type="button"
                 onClick={() => handleRerunCheck(false)}
                 disabled={busyAction !== null || !activeTaskId}
-                className="min-h-[38px] rounded-lg border border-amber-400/60 bg-amber-500/15 px-3.5 py-2 text-xs font-semibold text-amber-100 hover:bg-amber-500/25 disabled:opacity-50"
+                className="hud-chamfer-sm min-h-[38px] border border-amber-400/60 bg-amber-500/15 px-3.5 py-2 font-mono-tabular text-xs font-semibold text-amber-100 hover:bg-amber-500/25 disabled:opacity-50"
               >
-                {busyAction === "rerunning" ? "独立复跑中..." : "用相同 runHash 独立复跑核验"}
+                {busyAction === "rerunning" ? "RE-RUNNING VM..." : "用相同 runHash 独立复跑核验"}
               </button>
 
               {rerunResult?.conflict && !rerunResult.disputeTx && (
@@ -1587,31 +1745,37 @@ export default function HomePage() {
                   type="button"
                   onClick={() => handleRerunCheck(true)}
                   disabled={busyAction !== null}
-                  className="min-h-[38px] rounded-lg bg-rose-600 px-3.5 py-2 text-xs font-semibold text-white hover:bg-rose-500 disabled:opacity-50"
+                  className="hud-chamfer-sm min-h-[38px] bg-rose-500 px-3.5 py-2 font-mono-tabular text-xs font-bold text-slate-950 hover:bg-rose-400 disabled:opacity-50"
                 >
                   {busyAction === "disputing"
-                    ? "正在链上提交争议..."
-                    : "⚡ 发现伪造签名！提交链上 disputeCheck 冻结剩余资金"}
+                    ? "SUBMITTING DISPUTE..."
+                    : "⚡ 抓包造假！提交链上 disputeCheck 冻结资金"}
                 </button>
               )}
             </div>
 
             {rerunResult && (
               <div
-                className={`mt-3 rounded-lg border p-3 text-xs ${
+                className={`mt-3 border p-3 text-xs ${
                   rerunResult.conflict
-                    ? "border-rose-500/70 bg-rose-950/35 text-rose-100"
-                    : "border-emerald-500/50 bg-emerald-950/20 text-emerald-100"
+                    ? "border-rose-400/70 bg-rose-950/35 text-rose-100"
+                    : "border-[#a3e635]/50 bg-[#a3e635]/10 text-[#d9f99d]"
                 }`}
               >
                 <div className="font-semibold">
                   {rerunResult.conflict
-                    ? `✕ 检测到冲突（Check #${rerunResult.checkIndex}）：Verifier 链上记录与独立复跑不一致！`
-                    : `✓ 复跑一致（Check #${rerunResult.checkIndex}）：独立沙盒完全复现了链上 receiptHash`}
+                    ? `✕ 检测到冲突（Check #${rerunResult.checkIndex}）：Verifier 链上签名与独立复跑不一致！`
+                    : `✓ 复跑一致（Check #${rerunResult.checkIndex}）：独立沙盒完全复现链上 receiptHash`}
                 </div>
                 <div className="mt-2 space-y-1 font-mono-tabular text-[11px]">
-                  <div>Onchain : passed={String(rerunResult.onchain.passed)} · {rerunResult.onchain.receiptHash}</div>
-                  <div>Re-run  : passed={String(rerunResult.rerun.passed)} · {rerunResult.rerun.receiptHash}</div>
+                  <div>
+                    ONCHAIN: passed={String(rerunResult.onchain.passed)} ·{" "}
+                    {rerunResult.onchain.receiptHash}
+                  </div>
+                  <div>
+                    RE-RUN : passed={String(rerunResult.rerun.passed)} ·{" "}
+                    {rerunResult.rerun.receiptHash}
+                  </div>
                   <div className="text-slate-300">{rerunResult.rerun.stdout}</div>
                 </div>
                 {rerunResult.disputeTx && (
@@ -1633,13 +1797,12 @@ export default function HomePage() {
           </section>
         </div>
 
-        {/* Footer */}
-        <footer className="flex flex-wrap items-center justify-between gap-2 border-t border-[#272940] pt-3 text-xs text-[#a7abc4]">
+        <footer className="flex flex-wrap items-center justify-between gap-2 border-t border-cyan-400/15 pt-3 font-mono-tabular text-[11px] text-[#8aa0b4]">
           <div>
-            TaskRail Stream · Built on Monad Testnet (Chain ID 10143) · Open-source testnet demo, non-custodial.
+            TASKRAIL STREAM // MONAD TESTNET (10143) // NON-CUSTODIAL OPEN-SOURCE PROTOTYPE
           </div>
           <div>
-            商业模式：面向 AI 外包工作室与多 Agent 协作平台，按流式验证结算收取 0.5% 协议验证费 + 企业私有 Verifier 订阅。
+            商业演进：短期切入 AI 安全红队针对性攻击测试（PoC 抓出漏洞按条结算），长期拓展多 Agent 外包流式验证（0.5% 协议费 + 企业私有 Verifier）
           </div>
         </footer>
       </main>

@@ -2,29 +2,33 @@
 
 :root {
   color-scheme: dark;
-  --bg-canvas: #0b0b12;
-  --bg-panel: #12131f;
-  --bg-panel-elevated: #181a2a;
-  --border-subtle: #272940;
-  --border-strong: #3e4166;
-  --text-primary: #f4f4f8;
-  --text-secondary: #a7abc4;
-  --accent-monad: #836ef9;
-  --accent-monad-bright: #a796ff;
-  --scrollbar-thumb: #3b3e5e;
-  --scrollbar-track: #11121d;
-  accent-color: var(--accent-monad);
+  --hud-bg: #05080f;
+  --hud-bg2: #070b16;
+  --hud-panel: #0a1020;
+  --hud-panel2: #0d1426;
+  --hud-line: rgba(34, 211, 238, 0.16);
+  --hud-line-bright: rgba(34, 211, 238, 0.5);
+  --hud-cyan: #22d3ee;
+  --hud-monad: #836ef9;
+  --hud-lime: #a3e635;
+  --hud-amber: #f59e0b;
+  --hud-rose: #fb7185;
+  --hud-text: #e6f2f8;
+  --hud-muted: #8aa0b4;
+  --hud-faint: #5a6d82;
+  --scrollbar-thumb: #1f334a;
+  --scrollbar-track: #070b16;
+  accent-color: var(--hud-cyan);
   scrollbar-color: var(--scrollbar-thumb) var(--scrollbar-track);
 }
 
 @supports not (scrollbar-color: auto) {
   *::-webkit-scrollbar {
-    width: 10px;
-    height: 10px;
+    width: 8px;
+    height: 8px;
   }
   *::-webkit-scrollbar-thumb {
     background: var(--scrollbar-thumb);
-    border-radius: 6px;
   }
   *::-webkit-scrollbar-track {
     background: var(--scrollbar-track);
@@ -33,19 +37,126 @@
 
 html,
 body {
-  background-color: var(--bg-canvas);
-  color: var(--text-primary);
-  font-family: system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+  background-color: var(--hud-bg);
+  background-image:
+    linear-gradient(rgba(34, 211, 238, 0.032) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(34, 211, 238, 0.032) 1px, transparent 1px),
+    radial-gradient(900px 420px at 18% -10%, rgba(131, 110, 249, 0.14), transparent 70%),
+    radial-gradient(800px 380px at 85% -5%, rgba(34, 211, 238, 0.09), transparent 70%);
+  background-size: 32px 32px, 32px 32px, 100% 100%, 100% 100%;
+  color: var(--hud-text);
+  font-family: "Space Grotesk", system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
   min-height: 100vh;
 }
 
 .font-mono-tabular {
-  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
   font-variant-numeric: tabular-nums;
 }
 
+/* M.A.V.E.N. Mission Control HUD panel with 4-corner L-brackets */
+.hud-panel {
+  position: relative;
+  border-radius: 2px;
+  border: 1px solid var(--hud-line);
+  background-color: rgba(10, 16, 32, 0.92);
+  background-image:
+    linear-gradient(var(--hud-cyan), var(--hud-cyan)),
+    linear-gradient(var(--hud-cyan), var(--hud-cyan)),
+    linear-gradient(var(--hud-cyan), var(--hud-cyan)),
+    linear-gradient(var(--hud-cyan), var(--hud-cyan)),
+    linear-gradient(var(--hud-cyan), var(--hud-cyan)),
+    linear-gradient(var(--hud-cyan), var(--hud-cyan)),
+    linear-gradient(var(--hud-cyan), var(--hud-cyan)),
+    linear-gradient(var(--hud-cyan), var(--hud-cyan));
+  background-repeat: no-repeat;
+  background-size:
+    10px 1.5px, 1.5px 10px,
+    10px 1.5px, 1.5px 10px,
+    10px 1.5px, 1.5px 10px,
+    10px 1.5px, 1.5px 10px;
+  background-position:
+    top left, top left,
+    top right, top right,
+    bottom left, bottom left,
+    bottom right, bottom right;
+}
+
+.hud-panel-alert {
+  border-color: rgba(251, 113, 133, 0.45);
+  background-color: rgba(34, 12, 22, 0.9);
+  background-image:
+    linear-gradient(var(--hud-rose), var(--hud-rose)),
+    linear-gradient(var(--hud-rose), var(--hud-rose)),
+    linear-gradient(var(--hud-rose), var(--hud-rose)),
+    linear-gradient(var(--hud-rose), var(--hud-rose)),
+    linear-gradient(var(--hud-rose), var(--hud-rose)),
+    linear-gradient(var(--hud-rose), var(--hud-rose)),
+    linear-gradient(var(--hud-rose), var(--hud-rose)),
+    linear-gradient(var(--hud-rose), var(--hud-rose));
+}
+
+.hud-panel-lime {
+  border-color: rgba(163, 230, 53, 0.4);
+  background-color: rgba(13, 25, 20, 0.9);
+  background-image:
+    linear-gradient(var(--hud-lime), var(--hud-lime)),
+    linear-gradient(var(--hud-lime), var(--hud-lime)),
+    linear-gradient(var(--hud-lime), var(--hud-lime)),
+    linear-gradient(var(--hud-lime), var(--hud-lime)),
+    linear-gradient(var(--hud-lime), var(--hud-lime)),
+    linear-gradient(var(--hud-lime), var(--hud-lime)),
+    linear-gradient(var(--hud-lime), var(--hud-lime)),
+    linear-gradient(var(--hud-lime), var(--hud-lime));
+}
+
+/* 45-degree chamfered cut-corner badges & buttons */
+.hud-chamfer {
+  clip-path: polygon(
+    7px 0,
+    100% 0,
+    100% calc(100% - 7px),
+    calc(100% - 7px) 100%,
+    0 100%,
+    0 7px
+  );
+}
+
+.hud-chamfer-sm {
+  clip-path: polygon(
+    5px 0,
+    100% 0,
+    100% calc(100% - 5px),
+    calc(100% - 5px) 100%,
+    0 100%,
+    0 5px
+  );
+}
+
+@keyframes hud-pulse-led {
+  0%,
+  100% {
+    opacity: 1;
+    filter: drop-shadow(0 0 4px currentColor);
+  }
+  50% {
+    opacity: 0.45;
+    filter: none;
+  }
+}
+
+.hud-led {
+  animation: hud-pulse-led 1.8s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .hud-led {
+    animation: none;
+  }
+}
+
 :where(a:any-link, button, input, select):focus-visible {
-  outline: 2px solid var(--accent-monad-bright);
+  outline: 2px solid var(--hud-cyan);
   outline-offset: 2px;
 }
 
@@ -62,7 +173,8 @@ body {
 }
 
 @media (forced-colors: active) {
-  .panel-card {
+  .hud-panel {
     border: 1px solid CanvasText;
+    background-image: none;
   }
 }

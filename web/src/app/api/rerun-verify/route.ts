@@ -1,15 +1,15 @@
 import { NextResponse } from "next/server";
 import { TASKRAIL_ABI } from "@/lib/abi";
 import { getContractAddress, getPublicClient } from "@/lib/chain";
-import { computeRunHash, executeSingleCheck } from "@/lib/runner";
-import { PatchId } from "@/lib/suite";
+import { executeSingleCheck, resolveMutationsByRunHash } from "@/lib/runner";
 import { disputeDemoCheckOnchain } from "@/lib/verifier";
 
 export const dynamic = "force-dynamic";
 
 /**
  * Independent same-runHash re-run verifier & optional onchain dispute trigger.
- * Re-executes the sandboxed check from scratch for the exact onchain runHash and compares receipts.
+ * Reverses the exact whitelisted mutation set purely from onchain `runHash` (across all 16 combinations),
+ * re-executes the sandboxed check from scratch, and compares receiptHashes byte-for-byte.
  */
 export async function POST(req: Request) {
   try {
@@ -25,31 +25,25 @@ export async function POST(req: Request) {
     const contractAddress = getContractAddress();
     const publicClient = getPublicClient();
 
-    const task = await publicClient.readContract({
-      address: contractAddress,
-      abi: TASKRAIL_ABI,
-      functionName: "getTask",
-      args: [taskId],
-    });
-    const checks = await publicClient.readContract({
-      address: contractAddress,
-      abi: TASKRAIL_ABI,
-      functionName: "getAllChecks",
-      args: [taskId],
-    });
+    const [task, checks] = await Promise.all([
+      publicClient.readContract({
+        address: contractAddress,
+        abi: TASKRAIL_ABI,
+        functionName: "getTask",
+        args: [taskId],
+      }),
+      publicClient.readContract({
+        address: contractAddress,
+        abi: TASKRAIL_ABI,
+        functionName: "getAllChecks",
+        args: [taskId],
+      }),
+    ]);
 
-    // Resolve which audited patch corresponds to the onchain runHash
-    let matchedPatch: PatchId | null = null;
-    for (const pid of ["patch-pass", "patch-fail"] as PatchId[]) {
-      if (computeRunHash(pid).toLowerCase() === task.runHash.toLowerCase()) {
-        matchedPatch = pid;
-        break;
-      }
-    }
-
-    if (!matchedPatch) {
+    const matchedMutations = resolveMutationsByRunHash(task.runHash);
+    if (!matchedMutations) {
       return NextResponse.json(
-        { error: "Onchain runHash does not match any local audited patch" },
+        { error: "Onchain runHash does not match any whitelisted mutation combination" },
         { status: 404 }
       );
     }
@@ -57,10 +51,13 @@ export async function POST(req: Request) {
     const idx = Number.isInteger(checkIndex) ? checkIndex : Math.max(0, checks.length - 1);
     const onchainRec = checks[idx];
     if (!onchainRec) {
-      return NextResponse.json({ error: `Check #${idx} not recorded onchain yet` }, { status: 400 });
+      return NextResponse.json(
+        { error: `Check #${idx} not recorded onchain yet` },
+        { status: 400 }
+      );
     }
 
-    const rerun = executeSingleCheck(matchedPatch, idx);
+    const rerun = executeSingleCheck(matchedMutations, idx);
     const receiptMatches =
       rerun.receiptHash.toLowerCase() === onchainRec.receiptHash.toLowerCase();
     const passedMatches = rerun.passed === onchainRec.passed;
@@ -78,7 +75,7 @@ export async function POST(req: Request) {
 
     return NextResponse.json({
       ok: true,
-      patchId: matchedPatch,
+      mutations: matchedMutations,
       runHash: task.runHash,
       checkIndex: idx,
       onchain: {

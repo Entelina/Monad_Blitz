@@ -1,9 +1,17 @@
 import vm from "node:vm";
 import { encodePacked, keccak256 } from "viem";
-import { AGENT_PATCHES, PatchId, RUNNER_SPEC, TEST_SUITE_SPEC, TestCaseSpec } from "./suite";
+import {
+  ALL_MUTATION_IDS,
+  BugMutationId,
+  normalizeMutations,
+  RUNNER_SPEC,
+  synthesizeVaultSource,
+  TEST_SUITE_SPEC,
+  TestCaseSpec,
+} from "./suite";
 
 export interface CheckExecutionResult {
-  patchId: PatchId;
+  mutations: BugMutationId[];
   commit: string;
   runHash: `0x${string}`;
   checkIndex: number;
@@ -24,20 +32,56 @@ const SUITE_HASH = keccak256(
   encodePacked(["string"], [JSON.stringify(TEST_SUITE_SPEC.map((t) => t.id))])
 );
 
-export function computeRunHash(patchId: PatchId): `0x${string}` {
-  const patch = AGENT_PATCHES[patchId];
-  if (!patch) throw new Error(`Unknown patchId: ${patchId}`);
-  const diffHash = keccak256(encodePacked(["string"], [patch.sourceCode]));
-  return keccak256(
+export function computeCommitAndRunHash(mutations: BugMutationId[]): {
+  mutations: BugMutationId[];
+  commit: string;
+  diffHash: `0x${string}`;
+  runHash: `0x${string}`;
+} {
+  const canonical = normalizeMutations(mutations);
+  const { sourceCode } = synthesizeVaultSource(canonical);
+  const diffHash = keccak256(encodePacked(["string"], [sourceCode]));
+  // Deterministic 40-char commit hash derived from exact canonical mutation set + source
+  const commit =
+    canonical.length === 0
+      ? "7f4c91ae3b2d88f1092a4c7129e8d31b4a0f1190"
+      : canonical.length === 1 && canonical[0] === "drop_owner_acl"
+        ? "3d8e20bf91a4c621d8b3009a1e72c45f88b0e214"
+        : diffHash.slice(2, 42);
+
+  const runHash = keccak256(
     encodePacked(
       ["string", "bytes32", "bytes32", "string"],
-      [patch.commit, diffHash, SUITE_HASH, RUNNER_SPEC]
+      [commit, diffHash, SUITE_HASH, RUNNER_SPEC]
     )
   );
+  return { mutations: canonical, commit, diffHash, runHash };
+}
+
+/**
+ * Stateless reverse lookup across all 2^4 = 16 whitelisted mutation combinations
+ * so any third party can independently re-run a task purely from its onchain `runHash`.
+ */
+export function resolveMutationsByRunHash(
+  targetRunHash: `0x${string}`
+): BugMutationId[] | null {
+  const n = ALL_MUTATION_IDS.length;
+  const target = targetRunHash.toLowerCase();
+  for (let mask = 0; mask < 1 << n; mask++) {
+    const combo: BugMutationId[] = [];
+    for (let bit = 0; bit < n; bit++) {
+      if ((mask & (1 << bit)) !== 0) {
+        combo.push(ALL_MUTATION_IDS[bit]);
+      }
+    }
+    if (computeCommitAndRunHash(combo).runHash.toLowerCase() === target) {
+      return combo;
+    }
+  }
+  return null;
 }
 
 function loadVaultGuardInSandbox(sourceCode: string) {
-  // Block dangerous globals explicitly; clean empty context with only JS built-ins
   const forbidden = /\b(require|process|globalThis|child_process|eval|Function|fetch)\b/;
   if (forbidden.test(sourceCode)) {
     throw new Error("STATIC_POLICY_VIOLATION: Forbidden host identifier detected");
@@ -59,7 +103,9 @@ function loadVaultGuardInSandbox(sourceCode: string) {
 
 function assertEq(actual: unknown, expected: unknown, msg: string) {
   if (actual !== expected) {
-    throw new Error(`AssertionError: ${msg} (expected=${String(expected)}, actual=${String(actual)})`);
+    throw new Error(
+      `AssertionError: ${msg} (expected=${String(expected)}, actual=${String(actual)})`
+    );
   }
 }
 
@@ -71,7 +117,9 @@ function assertThrows(fn: () => void, expectedMsg: string, label: string) {
     caught = e instanceof Error ? e : new Error(String(e));
   }
   if (!caught) {
-    throw new Error(`AssertionError: ${label} — expected throw "${expectedMsg}", but succeeded!`);
+    throw new Error(
+      `AssertionError: ${label} — expected throw "${expectedMsg}", but succeeded!`
+    );
   }
   if (!caught.message.includes(expectedMsg)) {
     throw new Error(
@@ -80,13 +128,16 @@ function assertThrows(fn: () => void, expectedMsg: string, label: string) {
   }
 }
 
-export function executeSingleCheck(patchId: PatchId, checkIndex: number): CheckExecutionResult {
-  const patch = AGENT_PATCHES[patchId];
-  if (!patch) throw new Error(`Unknown patchId: ${patchId}`);
+export function executeSingleCheck(
+  mutations: BugMutationId[],
+  checkIndex: number
+): CheckExecutionResult {
+  const canonical = normalizeMutations(mutations);
+  const synthesized = synthesizeVaultSource(canonical);
   const spec = TEST_SUITE_SPEC[checkIndex];
   if (!spec) throw new Error(`Invalid checkIndex: ${checkIndex}`);
 
-  const runHash = computeRunHash(patchId);
+  const { commit, runHash } = computeCommitAndRunHash(canonical);
   const start = performance.now();
 
   let passed = false;
@@ -94,13 +145,13 @@ export function executeSingleCheck(patchId: PatchId, checkIndex: number): CheckE
   let errorMessage: string | undefined;
 
   try {
-    const VaultGuard = loadVaultGuardInSandbox(patch.sourceCode);
+    const VaultGuard = loadVaultGuardInSandbox(synthesized.sourceCode);
 
     switch (checkIndex) {
       case 0: {
         const v = new VaultGuard(OWNER);
         assertEq(v.owner, OWNER.toLowerCase(), "owner normalized");
-        stdout = `[BUILD] Compiled vault-guard.js (${patch.sourceCode.length}B) in isolated node:vm · 0 static policy violations`;
+        stdout = `[BUILD] Compiled vault-guard.js (${synthesized.sourceCode.length}B, mutations=${canonical.length}) in isolated node:vm · 0 static violations`;
         break;
       }
       case 1: {
@@ -124,7 +175,7 @@ export function executeSingleCheck(patchId: PatchId, checkIndex: number): CheckE
       }
       case 4: {
         const v = new VaultGuard(OWNER, 25);
-        assertEq(v.quoteFee(10000n), 25n, "25 bps on 10000");
+        assertEq(v.quoteFee(10000n), 25n, "25 bps fee on 10000n");
         assertEq(v.quoteFee(999n), 2n, "floor division precision");
         stdout = `[PASS] quoteFee(10000n)=25n, quoteFee(999n)=2n (BigInt exact)`;
         break;
@@ -246,7 +297,6 @@ export function executeSingleCheck(patchId: PatchId, checkIndex: number): CheckE
 
   const durationMs = Number((performance.now() - start).toFixed(2));
   const outputHash = keccak256(encodePacked(["string"], [stdout]));
-  // Deterministic receipt hash bound to runHash + checkIndex + testId + passed + outputHash
   const receiptHash = keccak256(
     encodePacked(
       ["bytes32", "uint16", "string", "bool", "bytes32"],
@@ -255,8 +305,8 @@ export function executeSingleCheck(patchId: PatchId, checkIndex: number): CheckE
   );
 
   return {
-    patchId,
-    commit: patch.commit,
+    mutations: canonical,
+    commit,
     runHash,
     checkIndex,
     spec,

@@ -1,14 +1,20 @@
 export type PatchId = "patch-pass" | "patch-fail";
 
-export interface AgentPatch {
-  id: PatchId;
-  prNumber: string;
-  title: string;
-  agentName: string;
-  commit: string;
-  summary: string;
-  diffPreview: string[];
-  sourceCode: string;
+export type BugMutationId =
+  | "drop_fee_precision"
+  | "drop_owner_acl"
+  | "drop_withdraw_cap"
+  | "drop_reentrancy_lock";
+
+export interface BugMutationSpec {
+  id: BugMutationId;
+  label: string;
+  shortTag: string;
+  targetCheckIndex: number;
+  targetCheckName: string;
+  severity: "CRITICAL" | "HIGH";
+  description: string;
+  diffSnippet: string[];
 }
 
 export interface TestCaseSpec {
@@ -20,13 +26,21 @@ export interface TestCaseSpec {
   description: string;
 }
 
-export const RUNNER_SPEC = "taskrail-vm-runner@1.0.0:node24:strict-isolated-context";
+export interface UnverifiedBoundaryItem {
+  id: string;
+  scope: string;
+  reason: string;
+  owner: "HUMAN_AUDIT" | "FORMAL_VERIFICATION" | "SUPPLY_CHAIN";
+}
+
+export const RUNNER_SPEC = "taskrail-vm-runner@1.1.0:node24:strict-isolated-context";
 
 /**
- * Target audited Patch A (16/16 checks pass):
- * Real DeFi Vault Withdrawal Guard written by an AI Coding Agent.
+ * Clean audited baseline implementation (16/16 checks pass).
+ * Any selected BugMutationId dynamically mutates real lines of this source code
+ * before compilation & execution inside isolated node:vm.
  */
-const PATCH_PASS_SOURCE = `
+export const BASELINE_VAULT_SOURCE = `
 class VaultGuard {
   constructor(owner, feeBps = 25, maxSingleWithdraw = 10000n) {
     if (!owner || owner === "0x0000000000000000000000000000000000000000") {
@@ -94,7 +108,6 @@ class VaultGuard {
 
     this.locked = true;
     try {
-      // Checks-Effects-Interactions: deduct before callback
       const fee = this.quoteFee(amt);
       const net = amt - fee;
       this.balances.set(key, bal - amt);
@@ -121,58 +134,195 @@ class VaultGuard {
 module.exports = { VaultGuard };
 `;
 
-/**
- * Target audited Patch B (Fails on Check #5: broken admin role check in setPaused/emergencySweep):
- * Passes build & basic deposit/withdraw/fee tests (Checks 0..4),
- * then triggers an auth bypass failure on Check #5 -> immediate onchain HALTED circuit breaker!
- */
-const PATCH_FAIL_SOURCE = PATCH_PASS_SOURCE
-  .replace(
-    `  setPaused(caller, flag) {\n    if (caller.toLowerCase() !== this.owner) throw new Error("UNAUTHORIZED");\n    this.paused = Boolean(flag);\n  }`,
-    `  setPaused(caller, flag) {\n    // BUG introduced by AI Agent refactor: missing owner role check!\n    this.paused = Boolean(flag);\n  }`
-  )
-  .replace(
-    `  emergencySweep(caller, recipient, amount) {\n    if (caller.toLowerCase() !== this.owner) throw new Error("UNAUTHORIZED");`,
-    `  emergencySweep(caller, recipient, amount) {\n    // BUG: skipped owner check during quick patch`
-  );
-
-export const AGENT_PATCHES: Record<PatchId, AgentPatch> = {
-  "patch-pass": {
-    id: "patch-pass",
-    prNumber: "PR #142",
-    title: "feat(vault): implement CEI withdrawal guard & owner ACL",
-    agentName: "Claude-Code-Agent-07",
-    commit: "7f4c91ae3b2d88f1092a4c7129e8d31b4a0f1190",
-    summary: "Complete implementation with strict owner RBAC, CEI reentrancy lock, fee math, timelock, and emergency sweep checks.",
-    diffPreview: [
-      "@@ -31,6 +31,10 @@ class VaultGuard {",
-      "+  setPaused(caller, flag) {",
-      "+    if (caller.toLowerCase() !== this.owner) throw new Error('UNAUTHORIZED');",
-      "+    this.paused = Boolean(flag);",
-      "+  }",
-      "+  emergencySweep(caller, recipient, amount) {",
-      "+    if (caller.toLowerCase() !== this.owner) throw new Error('UNAUTHORIZED');",
+export const BUG_MUTATIONS: BugMutationSpec[] = [
+  {
+    id: "drop_fee_precision",
+    label: "破坏手续费 BigInt 分母精度",
+    shortTag: "FEE ×10 BUG",
+    targetCheckIndex: 4,
+    targetCheckName: "Check #04 · Fee Precision",
+    severity: "HIGH",
+    description: "将 quoteFee 分母 10000n 错写为 1000n，导致用户被多扣 10 倍手续费",
+    diffSnippet: [
+      "@@ -47,4 +47,4 @@ quoteFee(amount) {",
+      "-    return (amt * this.feeBps) / 10000n;",
+      "+    return (amt * this.feeBps) / 1000n; // MUTATED: 10x fee overcharge bug",
     ],
-    sourceCode: PATCH_PASS_SOURCE,
   },
-  "patch-fail": {
-    id: "patch-fail",
-    prNumber: "PR #143",
-    title: "refactor(vault): simplify pause & sweep helper (contains ACL bug)",
-    agentName: "Codex-Refactor-Agent-03",
-    commit: "3d8e20bf91a4c621d8b3009a1e72c45f88b0e214",
-    summary: "Passes syntax & happy-path tests (#0-#4), but AI agent accidentally dropped owner check in setPaused/emergencySweep -> caught at Check #5.",
-    diffPreview: [
-      "@@ -31,6 +31,8 @@ class VaultGuard {",
-      "   setPaused(caller, flag) {",
+  {
+    id: "drop_owner_acl",
+    label: "删除 Owner 权限校验 (ACL)",
+    shortTag: "ACL BYPASS",
+    targetCheckIndex: 5,
+    targetCheckName: "Check #05 · Owner RBAC",
+    severity: "CRITICAL",
+    description: "重构时遗漏 setPaused() 与 emergencySweep() 的 owner 身份校验",
+    diffSnippet: [
+      "@@ -31,5 +31,5 @@ setPaused(caller, flag) {",
       "-    if (caller.toLowerCase() !== this.owner) throw new Error('UNAUTHORIZED');",
-      "+    // AI refactor removed guard by mistake",
+      "+    // MUTATED: AI refactor dropped owner ACL guard",
       "     this.paused = Boolean(flag);",
-      "   }",
     ],
-    sourceCode: PATCH_FAIL_SOURCE,
   },
-};
+  {
+    id: "drop_withdraw_cap",
+    label: "取消单笔提现风控上限",
+    shortTag: "NO WITHDRAW CAP",
+    targetCheckIndex: 10,
+    targetCheckName: "Check #10 · Single Cap",
+    severity: "HIGH",
+    description: "移除 withdraw() 中 maxSingleWithdraw 限额校验，允许单笔掏空金库",
+    diffSnippet: [
+      "@@ -59,3 +59,3 @@ withdraw(caller, amount, nowTs, hook) {",
+      "-    if (amt > this.maxSingleWithdraw) throw new Error('EXCEEDS_LIMIT');",
+      "+    // MUTATED: single-tx withdrawal cap check removed",
+    ],
+  },
+  {
+    id: "drop_reentrancy_lock",
+    label: "移除 CEI 重入锁保护",
+    shortTag: "REENTRANCY",
+    targetCheckIndex: 11,
+    targetCheckName: "Check #11 · Reentrancy",
+    severity: "CRITICAL",
+    description: "移除 withdraw() 入口的 this.locked 重入锁检测，暴露嵌套回调攻击面",
+    diffSnippet: [
+      "@@ -54,3 +54,3 @@ withdraw(caller, amount, nowTs, hook) {",
+      "-    if (this.locked) throw new Error('REENTRANCY');",
+      "+    // MUTATED: reentrancy guard stripped during refactor",
+    ],
+  },
+];
+
+export const ALL_MUTATION_IDS: BugMutationId[] = BUG_MUTATIONS.map((m) => m.id);
+
+export function normalizeMutations(input?: unknown): BugMutationId[] {
+  if (!Array.isArray(input)) return [];
+  const validSet = new Set<string>(ALL_MUTATION_IDS);
+  const picked = new Set<BugMutationId>();
+  for (const raw of input) {
+    if (typeof raw === "string" && validSet.has(raw)) {
+      picked.add(raw as BugMutationId);
+    }
+  }
+  // Canonical deterministic ordering so runHash is 100% order-independent
+  return ALL_MUTATION_IDS.filter((id) => picked.has(id));
+}
+
+export function resolveMutations(
+  patchId?: PatchId,
+  mutations?: unknown
+): BugMutationId[] {
+  if (Array.isArray(mutations)) {
+    return normalizeMutations(mutations);
+  }
+  return patchId === "patch-fail" ? ["drop_owner_acl"] : [];
+}
+
+export function synthesizeVaultSource(mutations: BugMutationId[]): {
+  mutations: BugMutationId[];
+  sourceCode: string;
+  diffPreview: string[];
+  prNumber: string;
+  title: string;
+  agentName: string;
+  summary: string;
+  expectedFirstFailIndex: number | null;
+} {
+  const canonical = normalizeMutations(mutations);
+  let code = BASELINE_VAULT_SOURCE;
+  const diffLines: string[] = [];
+
+  if (canonical.includes("drop_fee_precision")) {
+    code = code.replace(
+      `return (amt * this.feeBps) / 10000n;`,
+      `return (amt * this.feeBps) / 1000n; // MUTATED: 10x fee overcharge bug`
+    );
+    diffLines.push(...BUG_MUTATIONS[0].diffSnippet);
+  }
+
+  if (canonical.includes("drop_owner_acl")) {
+    code = code
+      .replace(
+        `  setPaused(caller, flag) {\n    if (caller.toLowerCase() !== this.owner) throw new Error("UNAUTHORIZED");\n    this.paused = Boolean(flag);\n  }`,
+        `  setPaused(caller, flag) {\n    // MUTATED: AI refactor dropped owner ACL guard\n    this.paused = Boolean(flag);\n  }`
+      )
+      .replace(
+        `  emergencySweep(caller, recipient, amount) {\n    if (caller.toLowerCase() !== this.owner) throw new Error("UNAUTHORIZED");`,
+        `  emergencySweep(caller, recipient, amount) {\n    // MUTATED: skipped owner check`
+      );
+    diffLines.push(...BUG_MUTATIONS[1].diffSnippet);
+  }
+
+  if (canonical.includes("drop_withdraw_cap")) {
+    code = code.replace(
+      `if (amt > this.maxSingleWithdraw) throw new Error("EXCEEDS_LIMIT");`,
+      `// MUTATED: single-tx withdrawal cap check removed`
+    );
+    diffLines.push(...BUG_MUTATIONS[2].diffSnippet);
+  }
+
+  if (canonical.includes("drop_reentrancy_lock")) {
+    code = code.replace(
+      `if (this.locked) throw new Error("REENTRANCY");`,
+      `// MUTATED: reentrancy guard stripped during refactor`
+    );
+    diffLines.push(...BUG_MUTATIONS[3].diffSnippet);
+  }
+
+  if (canonical.length === 0) {
+    return {
+      mutations: canonical,
+      sourceCode: code,
+      diffPreview: [
+        "@@ -31,6 +31,10 @@ class VaultGuard {",
+        "+  setPaused(caller, flag) {",
+        "+    if (caller.toLowerCase() !== this.owner) throw new Error('UNAUTHORIZED');",
+        "+    this.paused = Boolean(flag);",
+        "+  }",
+        "+  if (this.locked) throw new Error('REENTRANCY');",
+        "+  if (amt > this.maxSingleWithdraw) throw new Error('EXCEEDS_LIMIT');",
+      ],
+      prNumber: "PR #142",
+      title: "feat(vault): verified CEI withdrawal guard & full owner ACL",
+      agentName: "Claude-Code-Agent-07",
+      summary:
+        "Zero injected defects. Passes all 16 deterministic checks -> streams 15 micro-payouts + unlocks 40% final bonus.",
+      expectedFirstFailIndex: null,
+    };
+  }
+
+  const firstFail = Math.min(
+    ...canonical.map(
+      (id) => BUG_MUTATIONS.find((b) => b.id === id)!.targetCheckIndex
+    )
+  );
+  const tags = canonical
+    .map((id) => BUG_MUTATIONS.find((b) => b.id === id)!.shortTag)
+    .join(" + ");
+
+  const isDefaultPr143 =
+    canonical.length === 1 && canonical[0] === "drop_owner_acl";
+
+  return {
+    mutations: canonical,
+    sourceCode: code,
+    diffPreview: diffLines,
+    prNumber: isDefaultPr143 ? "PR #143" : "PR #143-MUTATED",
+    title: isDefaultPr143
+      ? "refactor(vault): simplify pause & sweep helper (ACL bug)"
+      : `live-mutation(vault): injected [${tags}]`,
+    agentName: isDefaultPr143
+      ? "Codex-Refactor-Agent-03"
+      : "Live-Mutated-Agent-PR",
+    summary: `Sandbox executes real mutated code; expected to pass Checks #00..#${String(
+      firstFail - 1
+    ).padStart(2, "0")}, then throw AssertionError at Check #${String(
+      firstFail
+    ).padStart(2, "0")} -> instant HALTED circuit breaker.`,
+    expectedFirstFailIndex: firstFail,
+  };
+}
 
 export const TEST_SUITE_SPEC: TestCaseSpec[] = [
   { index: 0, stage: "BUILD", id: "build.compile_and_static_gate", name: "Syntax Compile & Static Security Gate", category: "Build", description: "Parses JS AST in isolated VM & blocks eval/Function/process access" },
@@ -191,4 +341,25 @@ export const TEST_SUITE_SPEC: TestCaseSpec[] = [
   { index: 13, stage: "UNIT", id: "unit.timelock_blocks_early_withdraw", name: "Timelock rejects withdrawal before unlockTs", category: "Risk", description: "Enforces TIMELOCKED prior to unlock timestamp" },
   { index: 14, stage: "UNIT", id: "unit.allowlist_rejects_zero_addr", name: "Allowlist rejects zero address & non-owner", category: "Access", description: "Checks owner ACL and ZERO_ADDRESS rejection" },
   { index: 15, stage: "UNIT", id: "unit.emergency_sweep_requires_pause_and_owner", name: "Emergency sweep requires paused state & exact fee cap", category: "Security", description: "Full end-to-end invariant check -> releases final 40% bonus" },
+];
+
+export const UNVERIFIED_BOUNDARIES: UnverifiedBoundaryItem[] = [
+  {
+    id: "undecidable.product_spec_alignment",
+    scope: "业务逻辑与产品需求偏差（Spec Drift）",
+    reason: "单测只证明代码满足已写断言，无法判定需求本身是否合理或遗漏业务场景",
+    owner: "HUMAN_AUDIT",
+  },
+  {
+    id: "undecidable.zero_day_and_novel_vectors",
+    scope: "测试集未覆盖的未知组合攻击 / 零日缺陷",
+    reason: "熔断只能拦截已被测试覆盖的缺陷；未写入测试集的漏洞无法被自动发现",
+    owner: "FORMAL_VERIFICATION",
+  },
+  {
+    id: "undecidable.upstream_supply_chain",
+    scope: "上游依赖投毒与单验证者执行器可信度",
+    reason: "当前单验证者依赖同 runHash 复跑挑战约束，生产环境需升级 TEE 远程证明或 ERC-8004 质押多节点",
+    owner: "SUPPLY_CHAIN",
+  },
 ];
